@@ -430,9 +430,9 @@ namespace glz::detail
             val = sign ? -std::numeric_limits<T>::quiet_NaN() : std::numeric_limits<T>::quiet_NaN();
             return true;
          }
-         else if ((*cur | e_bit) == 'i' && (cur[1] | e_bit) == 'n' && (cur[2] | e_bit) == 'f')
-            && (cur[3] | e_bit) == 'i') && (cur[4] | e_bit) == 'n') && (cur[5] | e_bit) == 'i')
-            && (cur[6] | e_bit) == 't') && (cur[7] | e_bit) == 'y')) {
+         else if ((*cur | e_bit) == 'i' && (cur[1] | e_bit) == 'n' && (cur[2] | e_bit) == 'f'
+            && (cur[3] | e_bit) == 'i' && (cur[4] | e_bit) == 'n' && (cur[5] | e_bit) == 'i'
+            && (cur[6] | e_bit) == 't' && (cur[7] | e_bit) == 'y') {
             cur += 8;
             // We don't care about NaN vs Inf
             val = sign ? -std::numeric_limits<T>::quiet_NaN() : std::numeric_limits<T>::quiet_NaN();
