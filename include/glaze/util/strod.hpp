@@ -420,6 +420,21 @@ namespace glz::detail
          if constexpr (std::integral<T>) {
             return false;
          }
+         else if (*cur == '"' && (cur[1] | e_bit) == 'n' && (cur[2] | e_bit) == 'a'
+            && (cur[3] | e_bit) == 'n' && cur[4] == '"' ){
+            cur += 5;
+            val = sign ? -std::numeric_limits<T>::quiet_NaN() : std::numeric_limits<T>::quiet_NaN();
+            return true;
+         }
+         else if (*cur == '"' && (cur[1] | e_bit) == 'i' && (cur[2] | e_bit) == 'n'
+            &&(cur[3] | e_bit) == 'f' && (cur[4] | e_bit) == 'i' && (cur[5] | e_bit) == 'n'
+            && (cur[6] | e_bit) == 'i' && (cur[7] | e_bit) == 't' && (cur[8] | e_bit) == 'y'
+            && cur[9] == '"') {
+            cur += 10;
+            // We don't care about NaN vs Inf
+            val = sign ? -std::numeric_limits<T>::quiet_NaN() : std::numeric_limits<T>::quiet_NaN();
+            return true;
+         }
          else if (*cur == 'n' && cur[1] == 'u' && cur[2] == 'l' && cur[3] == 'l') {
             cur += 4;
             val = std::numeric_limits<T>::quiet_NaN();
