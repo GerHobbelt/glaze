@@ -1,4 +1,5 @@
 # Glaze
+
 One of the fastest JSON libraries in the world. Glaze reads and writes from object memory, simplifying interfaces and offering incredible performance.
 
 Glaze also supports:
@@ -188,6 +189,7 @@ The CMake has the option `glaze_ENABLE_AVX2`. This will attempt to use `AVX2` SI
 ## How To Use Glaze
 
 ### [FetchContent](https://cmake.org/cmake/help/latest/module/FetchContent.html)
+
 ```cmake
 include(FetchContent)
 
