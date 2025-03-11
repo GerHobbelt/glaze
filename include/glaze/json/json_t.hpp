@@ -137,7 +137,7 @@ namespace glz
       }
 
       // for integers
-      template <detail::int_t T>
+      template <int_t T>
       json_t& operator=(const T value)
       {
          data = static_cast<double>(value);
@@ -334,7 +334,7 @@ namespace glz
 {
    // These functions allow a json_t value to be read/written to a C++ struct
 
-   template <opts Opts, class T>
+   template <auto Opts, class T>
       requires read_supported<Opts.format, T>
    [[nodiscard]] error_ctx read(T& value, const json_t& source)
    {
@@ -348,7 +348,8 @@ namespace glz
       }
    }
 
-   template <read_json_supported T>
+   template <class T>
+      requires(read_supported<JSON, T>)
    [[nodiscard]] error_ctx read_json(T& value, const json_t& source)
    {
       auto buffer = source.dump();
@@ -360,7 +361,8 @@ namespace glz
       }
    }
 
-   template <read_json_supported T>
+   template <class T>
+      requires(read_supported<JSON, T>)
    [[nodiscard]] expected<T, error_ctx> read_json(const json_t& source)
    {
       auto buffer = source.dump();

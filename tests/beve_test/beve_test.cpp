@@ -46,8 +46,8 @@ struct glz::meta<my_struct>
    );
 };
 
-static_assert(glz::write_beve_supported<my_struct>);
-static_assert(glz::read_beve_supported<my_struct>);
+static_assert(glz::write_supported<glz::BEVE, my_struct>);
+static_assert(glz::read_supported<glz::BEVE, my_struct>);
 
 struct sub_thing
 {
@@ -1319,7 +1319,7 @@ struct reflectable_t
    constexpr bool operator==(const reflectable_t&) const noexcept = default;
 };
 
-static_assert(glz::detail::reflectable<reflectable_t>);
+static_assert(glz::reflectable<reflectable_t>);
 
 suite reflection_test = [] {
    "reflectable_t"_test = [] {
@@ -2377,8 +2377,13 @@ suite custom_load_test = [] {
    };
 };
 
+struct opts_concatenate : glz::opts
+{
+   bool concatenate = true;
+};
+
 suite pair_ranges_tests = [] {
-   static constexpr glz::opts concatenate_off{.format = glz::BEVE, .concatenate = false};
+   static constexpr opts_concatenate concatenate_off{{glz::BEVE}, false};
 
    "vector pair"_test = [] {
       std::vector<std::pair<int, int>> v{{1, 2}, {3, 4}};

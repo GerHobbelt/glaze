@@ -11,7 +11,7 @@
 namespace glz
 {
    // For writing to a std::string, std::vector<char>, std::deque<char> and the like
-   template <opts Opts, class T, output_buffer Buffer>
+   template <auto Opts, class T, output_buffer Buffer>
       requires write_supported<Opts.format, T>
    [[nodiscard]] error_ctx write(T&& value, Buffer& buffer, is_context auto&& ctx)
    {
@@ -22,7 +22,7 @@ namespace glz
          }
       }
       size_t ix = 0; // overwrite index
-      detail::to<Opts.format, std::remove_cvref_t<T>>::template op<Opts>(std::forward<T>(value), ctx, buffer, ix);
+      to<Opts.format, std::remove_cvref_t<T>>::template op<Opts>(std::forward<T>(value), ctx, buffer, ix);
       if constexpr (resizable<Buffer>) {
          buffer.resize(ix);
       }
@@ -30,7 +30,7 @@ namespace glz
       return {ctx.error, ctx.custom_error_message};
    }
 
-   template <auto& Partial, opts Opts, class T, output_buffer Buffer>
+   template <auto& Partial, auto Opts, class T, output_buffer Buffer>
       requires write_supported<Opts.format, T>
    [[nodiscard]] error_ctx write(T&& value, Buffer& buffer)
    {
@@ -42,27 +42,27 @@ namespace glz
       }
       context ctx{};
       size_t ix = 0;
-      detail::write_partial<Opts.format>::template op<Partial, Opts>(std::forward<T>(value), ctx, buffer, ix);
+      serialize_partial<Opts.format>::template op<Partial, Opts>(std::forward<T>(value), ctx, buffer, ix);
       if constexpr (resizable<Buffer>) {
          buffer.resize(ix);
       }
       return {ctx.error, ctx.custom_error_message};
    }
 
-   template <auto& Partial, opts Opts, class T, raw_buffer Buffer>
+   template <auto& Partial, auto Opts, class T, raw_buffer Buffer>
       requires write_supported<Opts.format, T>
    [[nodiscard]] glz::expected<size_t, error_ctx> write(T&& value, Buffer& buffer)
    {
       context ctx{};
       size_t ix = 0;
-      detail::write_partial<Opts.format>::template op<Partial, Opts>(std::forward<T>(value), ctx, buffer, ix);
+      serialize_partial<Opts.format>::template op<Partial, Opts>(std::forward<T>(value), ctx, buffer, ix);
       if (bool(ctx.error)) [[unlikely]] {
          return glz::unexpected(error_ctx{.ec = ctx.error, .custom_error_message = ctx.custom_error_message});
       }
       return {ix};
    }
 
-   template <opts Opts, class T, output_buffer Buffer>
+   template <auto Opts, class T, output_buffer Buffer>
       requires write_supported<Opts.format, T>
    [[nodiscard]] error_ctx write(T&& value, Buffer& buffer)
    {
@@ -70,7 +70,7 @@ namespace glz
       return write<Opts>(std::forward<T>(value), buffer, ctx);
    }
 
-   template <opts Opts, class T>
+   template <auto Opts, class T>
       requires write_supported<Opts.format, T>
    [[nodiscard]] glz::expected<std::string, error_ctx> write(T&& value)
    {
@@ -83,19 +83,19 @@ namespace glz
       return {buffer};
    }
 
-   template <opts Opts, class T, raw_buffer Buffer>
+   template <auto Opts, class T, raw_buffer Buffer>
       requires write_supported<Opts.format, T>
    [[nodiscard]] glz::expected<size_t, error_ctx> write(T&& value, Buffer&& buffer, is_context auto&& ctx)
    {
       size_t ix = 0;
-      detail::to<Opts.format, std::remove_cvref_t<T>>::template op<Opts>(std::forward<T>(value), ctx, buffer, ix);
+      to<Opts.format, std::remove_cvref_t<T>>::template op<Opts>(std::forward<T>(value), ctx, buffer, ix);
       if (bool(ctx.error)) [[unlikely]] {
          return glz::unexpected(error_ctx{ctx.error});
       }
       return {ix};
    }
 
-   template <opts Opts, class T, raw_buffer Buffer>
+   template <auto Opts, class T, raw_buffer Buffer>
       requires write_supported<Opts.format, T>
    [[nodiscard]] glz::expected<size_t, error_ctx> write(T&& value, Buffer&& buffer)
    {

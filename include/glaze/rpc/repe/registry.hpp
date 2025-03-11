@@ -34,7 +34,7 @@ namespace glz::repe
       };
    }
 
-   template <opts Opts, class Value>
+   template <auto Opts, class Value>
    void write_response(Value&& value, is_state auto&& state)
    {
       auto& in = state.in;
@@ -56,7 +56,7 @@ namespace glz::repe
       }
    }
 
-   template <opts Opts>
+   template <auto Opts>
    void write_response(is_state auto&& state)
    {
       auto& in = state.in;
@@ -80,7 +80,7 @@ namespace glz::repe
    }
 
    // returns 0 on error
-   template <opts Opts, class Value>
+   template <auto Opts, class Value>
    size_t read_params(Value&& value, auto&& state)
    {
       glz::context ctx{};
@@ -93,7 +93,7 @@ namespace glz::repe
       }
       auto start = b;
 
-      glz::detail::read<Opts.format>::template op<Opts>(std::forward<Value>(value), ctx, b, e);
+      glz::parse<Opts.format>::template op<Opts>(std::forward<Value>(value), ctx, b, e);
 
       if (bool(ctx.error)) {
          state.out.header.ec = ctx.error;
@@ -118,7 +118,7 @@ namespace glz::repe
 
    namespace detail
    {
-      template <opts Opts>
+      template <auto Opts>
       struct request_impl
       {
          message operator()(const user_header& h) const
@@ -169,7 +169,7 @@ namespace glz::repe
       };
    }
 
-   template <opts Opts>
+   template <auto Opts>
    inline constexpr auto request = detail::request_impl<Opts>{};
 
    inline constexpr auto request_beve = request<opts{BEVE}>;
@@ -188,7 +188,7 @@ namespace glz::repe
    }
 
    // This registry does not support adding methods from RPC calls or adding methods once RPC calls can be made.
-   template <opts Opts = opts{}>
+   template <auto Opts = opts{}>
    struct registry
    {
       using procedure = std::function<void(state&&)>; // RPC method
@@ -198,7 +198,7 @@ namespace glz::repe
 
       // Register a C++ type that stores pointers to the value, so be sure to keep the registered value alive
       template <const std::string_view& root = detail::empty_path, class T, const std::string_view& parent = root>
-         requires(glz::detail::glaze_object_t<T> || glz::detail::reflectable<T>)
+         requires(glz::glaze_object_t<T> || glz::reflectable<T>)
       void on(T& value)
       {
          using namespace glz::detail;
@@ -213,8 +213,7 @@ namespace glz::repe
             }
          }();
 
-         if constexpr (parent == root && (glaze_object_t<T> ||
-                                          reflectable<T>)&&!std::same_as<std::decay_t<decltype(t)>, std::nullptr_t>) {
+         if constexpr (parent == root && (glaze_object_t<T> || reflectable<T>)) {
             // build read/write calls to the top level object
             methods[root] = [&value](repe::state&& state) mutable {
                if (state.write()) {

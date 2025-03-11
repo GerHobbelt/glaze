@@ -80,7 +80,7 @@ namespace glz
 
       // Decodes a repe::message into a structure
       // Returns a std::string with a formatted error on error
-      template <opts Opts = opts{}, class T>
+      template <auto Opts = opts{}, class T>
       inline std::optional<std::string> decode_message(T&& value, message& msg)
       {
          if (bool(msg.header.ec)) {
@@ -304,7 +304,7 @@ namespace glz
       ~unique_socket() { pool->free(index); }
    };
 
-   template <opts Opts = opts{}>
+   template <auto Opts = opts{}>
    struct asio_client
    {
       std::string host{"localhost"}; // host name
@@ -381,11 +381,17 @@ namespace glz
       }
    };
 
-   template <opts Opts = opts{}>
+   template <auto Opts = opts{}>
    struct asio_server
    {
-      uint16_t port{};
+      uint16_t port{}; // 0 will select a random free port
       uint32_t concurrency{1}; // How many threads to use (a call to .run() is inclusive on the main thread)
+
+      // Register a callback that takes a string error message on server/registry errors.
+      // Note that we use a std::string to support a wide source of errors and use e.what()
+      // IMPORTANT: The code within the callback must be thread safe, as multiple threads could call this
+      // simultaneously.
+      std::function<void(const std::string&)> error_handler{};
 
       ~asio_server() { stop(); }
 
@@ -404,7 +410,7 @@ namespace glz
       void clear_registry() { registry.clear(); }
 
       template <const std::string_view& Root = repe::detail::empty_path, class T>
-         requires(glz::detail::glaze_object_t<T> || glz::detail::reflectable<T>)
+         requires(glz::glaze_object_t<T> || glz::reflectable<T>)
       void on(T& value)
       {
          registry.template on<Root>(value);
@@ -433,8 +439,13 @@ namespace glz
          // Setup signal handling to stop the server
          signals->async_wait([&](auto, auto) { ctx->stop(); });
 
+         // Create the acceptor synchronously so we know the actual port if set to 0 (select random free)
+         auto executor = ctx->get_executor();
+         asio::ip::tcp::acceptor acceptor(executor, {asio::ip::tcp::v6(), port});
+         port = acceptor.local_endpoint().port();
+
          // Start the listener coroutine
-         asio::co_spawn(*ctx, listener(), asio::detached);
+         asio::co_spawn(*ctx, listener(std::move(acceptor)), asio::detached);
 
          // Run the io_context in multiple threads for concurrency
          threads = std::shared_ptr<std::vector<std::thread>>(new std::vector<std::thread>{}, [](auto* ptr) {
@@ -485,14 +496,19 @@ namespace glz
             }
          }
          catch (const std::exception& e) {
-            std::fprintf(stderr, "%s\n", e.what());
+            if (error_handler) {
+               error_handler(e.what());
+            }
+            else {
+               std::fprintf(stderr, "glz::asio_server error: %s\n", e.what());
+            }
          }
       }
 
-      asio::awaitable<void> listener()
+      asio::awaitable<void> listener(asio::ip::tcp::acceptor acceptor)
       {
          auto executor = co_await asio::this_coro::executor;
-         asio::ip::tcp::acceptor acceptor(executor, {asio::ip::tcp::v6(), port});
+
          while (true) {
             auto socket = co_await acceptor.async_accept(asio::use_awaitable);
             asio::co_spawn(executor, run_instance(std::move(socket)), asio::detached);
