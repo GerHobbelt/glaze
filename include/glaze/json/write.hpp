@@ -440,7 +440,7 @@ namespace glz
                         const __m256i quote_char = _mm256_set1_epi8('"');
                         const __m256i backslash_char = _mm256_set1_epi8('\\');
                         const __m256i less_32_mask = _mm256_set1_epi8(0b01100000);
-                        const __m256i high_bit_mask = _mm256_set1_epi8(int8_t(0b10000000));
+                        const __m256i high_bit_mask = _mm256_set1_epi8(static_cast<int8_t>(0b10000000));
 
                         for (const char* end_m31 = e - 31; c < end_m31;) {
                            __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(c));
@@ -1363,14 +1363,26 @@ namespace glz
 
                using WriterType = meta_unknown_write_t<ValueType>;
                if constexpr (std::is_member_object_pointer_v<WriterType>) {
-                  // TODO: This intermediate is added to get GCC 14 to build
-                  decltype(auto) merged = glz::merge{value, value.*writer};
-                  write<JSON>::op<disable_write_unknown_on<Options>()>(std::move(merged), ctx, b, ix);
+                  decltype(auto) unknown_writer = value.*writer;
+                  if (unknown_writer.size() > 0) {
+                     // TODO: This intermediate is added to get GCC 14 to build
+                     decltype(auto) merged = glz::merge{value, unknown_writer};
+                     write<JSON>::op<disable_write_unknown_on<Options>()>(std::move(merged), ctx, b, ix);
+                  }
+                  else {
+                     write<JSON>::op<disable_write_unknown_on<Options>()>(value, ctx, b, ix);
+                  }
                }
                else if constexpr (std::is_member_function_pointer_v<WriterType>) {
-                  // TODO: This intermediate is added to get GCC 14 to build
-                  decltype(auto) merged = glz::merge{value, (value.*writer)()};
-                  write<JSON>::op<disable_write_unknown_on<Options>()>(std::move(merged), ctx, b, ix);
+                  decltype(auto) unknown_writer = (value.*writer)();
+                  if (unknown_writer.size() > 0) {
+                     // TODO: This intermediate is added to get GCC 14 to build
+                     decltype(auto) merged = glz::merge{value, unknown_writer};
+                     write<JSON>::op<disable_write_unknown_on<Options>()>(std::move(merged), ctx, b, ix);
+                  }
+                  else {
+                     write<JSON>::op<disable_write_unknown_on<Options>()>(value, ctx, b, ix);
+                  }
                }
                else {
                   static_assert(false_v<T>, "unknown_write type not handled");
@@ -1639,6 +1651,18 @@ namespace glz
          }
       };
 
+      template <class T>
+      consteval size_t key_index(const std::string_view key)
+      {
+         const auto n = reflect<T>::keys.size();
+         for (size_t i = 0; i < n; ++i) {
+            if (key == reflect<T>::keys[i]) {
+               return i;
+            }
+         }
+         return n;
+      }
+
       // Only object types are supported for partial
       template <class T>
          requires(glaze_object_t<T> || writable_map_t<T> || reflectable<T>)
@@ -1663,8 +1687,6 @@ namespace glz
             static constexpr auto num_members = reflect<T>::size;
 
             if constexpr ((num_members > 0) && (glaze_object_t<T> || reflectable<T>)) {
-               static constexpr auto HashInfo = hash_info<T>;
-
                invoke_table<N>([&]<size_t I>() {
                   if (bool(ctx.error)) [[unlikely]] {
                      return;
@@ -1679,8 +1701,7 @@ namespace glz
                   dump<quoted_key>(b, ix);
 
                   static constexpr auto sub_partial = get<1>(group);
-                  static constexpr auto index =
-                     decode_hash<JSON, T, HashInfo, HashInfo.type>::op(key.data(), key.data() + key.size());
+                  static constexpr auto index = key_index<T>(key);
                   static_assert(index < num_members, "Invalid key passed to partial write");
                   if constexpr (glaze_object_t<T>) {
                      static constexpr auto member = get<index>(reflect<T>::values);

@@ -50,6 +50,19 @@ namespace glz
    }
 }
 
+namespace glz
+{
+   template <size_t N>
+   inline constexpr void visit(auto&& lambda, const size_t index)
+   {
+      static constexpr auto mem_ptrs = []<size_t... I>(std::index_sequence<I...>) constexpr {
+         return std::array{&std::decay_t<decltype(lambda)>::template operator()<I>...};
+      }(std::make_index_sequence<N>{});
+
+      (lambda.*mem_ptrs[index])();
+   }
+}
+
 #define GLZ_PARENS ()
 
 // binary expansion is much more compile time efficient than quaternary expansion
@@ -72,10 +85,10 @@ namespace glz::detail
 #define GLZ_EVERY_HELPER(macro, a, ...) macro(a) __VA_OPT__(GLZ_EVERY_AGAIN GLZ_PARENS(macro, __VA_ARGS__))
 #define GLZ_EVERY_AGAIN() GLZ_EVERY_HELPER
 
-#define GLZ_CASE(I)                                           \
-   case I: {                                                  \
-      static_cast<Lambda&&>(lambda).template operator()<I>(); \
-      break;                                                  \
+#define GLZ_CASE(I)                    \
+   case I: {                           \
+      lambda.template operator()<I>(); \
+      break;                           \
    }
 
 #define GLZ_SWITCH(X, ...)                 \
@@ -103,7 +116,7 @@ namespace glz::detail
          return;
       }
       else if constexpr (N == 1) {
-         static_cast<Lambda&&>(lambda).template operator()<0>();
+         lambda.template operator()<0>();
       }
       GLZ_SWITCH(2, 0, 1)
       GLZ_SWITCH(3, 0, 1, 2)

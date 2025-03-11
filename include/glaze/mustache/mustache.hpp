@@ -24,7 +24,7 @@ namespace glz
       auto p = read_iterators<Opts, false>(tmp);
       auto it = p.first;
       auto end = p.second;
-      auto start = it;
+      auto outer_start = it;
       if (tmp.empty()) [[unlikely]] {
          ctx.error = error_code::no_read_input;
       }
@@ -75,7 +75,7 @@ namespace glz
                         [&]<size_t I>() {
                            static constexpr auto TargetKey = get<I>(reflect<T>::keys);
                            static constexpr auto Length = TargetKey.size();
-                           if ((Length == key.size()) && compare<Length>(TargetKey.data(), start)) [[likely]] {
+                           if ((Length == key.size()) && detail::comparitor<TargetKey>(start)) [[likely]] {
                               if constexpr (detail::reflectable<T> && N > 0) {
                                  std::ignore = write<opt_true<Opts, &opts::raw>>(
                                     detail::get_member(value, get<I>(detail::to_tuple(value))), temp, ctx);
@@ -128,7 +128,8 @@ namespace glz
       }
 
       if (bool(ctx.error)) [[unlikely]] {
-         return unexpected(error_ctx{ctx.error, ctx.custom_error_message, size_t(it - start), ctx.includer_error});
+         return unexpected(
+            error_ctx{ctx.error, ctx.custom_error_message, size_t(it - outer_start), ctx.includer_error});
       }
 
       return {result};

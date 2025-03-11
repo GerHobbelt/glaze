@@ -118,6 +118,9 @@ namespace glz
          }
       };
 
+      // CSV spec: https://www.ietf.org/rfc/rfc4180.txt
+      // Quotes are escaped via double quotes
+
       template <string_t T>
       struct from<CSV, T>
       {
@@ -129,32 +132,50 @@ namespace glz
             }
 
             value.clear();
-            auto start = it;
-            while (it < end) {
-               switch (*it) {
-               case ',':
-               case '\n': {
-                  value.append(start, static_cast<size_t>(it - start));
-                  return;
+
+            if (it == end) {
+               return;
+            }
+
+            if (*it == '"') {
+               // Quoted field
+               ++it; // Skip the opening quote
+               while (it != end) {
+                  if (*it == '"') {
+                     ++it; // Skip the quote
+                     if (it == end) {
+                        // End of input after closing quote
+                        break;
+                     }
+                     if (*it == '"') {
+                        // Escaped quote
+                        value.push_back('"');
+                        ++it;
+                     }
+                     else {
+                        // Closing quote
+                        break;
+                     }
+                  }
+                  else {
+                     value.push_back(*it);
+                     ++it;
+                  }
                }
-               case '\\':
-               case '\b':
-               case '\f':
-               case '\r':
-               case '\t': {
+               // After closing quote, expect comma, newline, or end of input
+               if (it != end && *it != ',' && *it == '\n') {
+                  // Invalid character after closing quote
                   ctx.error = error_code::syntax_error;
                   return;
                }
-               case '\0': {
-                  ctx.error = error_code::unexpected_end;
-                  return;
-               }
-               default:
+            }
+            else {
+               // Unquoted field
+               while (it != end && *it != ',' && *it != '\n') {
+                  value.push_back(*it);
                   ++it;
                }
             }
-
-            value.append(start, static_cast<size_t>(it - start));
          }
       };
 
@@ -439,7 +460,7 @@ namespace glz
                      decode_hash_with_size<CSV, T, HashInfo, HashInfo.type>::op(key.data(), end, key.size());
 
                   if (index < N) [[likely]] {
-                     jump_table<N>(
+                     visit<N>(
                         [&]<size_t I>() {
                            decltype(auto) member = [&]() -> decltype(auto) {
                               if constexpr (reflectable<T>) {
@@ -556,7 +577,7 @@ namespace glz
                            key.data(), key.data() + key.size(), key.size());
 
                         if (index < N) [[likely]] {
-                           jump_table<N>(
+                           visit<N>(
                               [&]<size_t I>() {
                                  decltype(auto) member = [&]() -> decltype(auto) {
                                     if constexpr (reflectable<T>) {
@@ -629,13 +650,12 @@ namespace glz
       return value;
    }
 
-   template <uint32_t layout = rowwise, read_csv_supported T>
-   [[nodiscard]] inline error_ctx read_file_csv(T& value, const sv file_name)
+   template <uint32_t layout = rowwise, read_csv_supported T, is_buffer Buffer>
+   [[nodiscard]] inline error_ctx read_file_csv(T& value, const sv file_name, Buffer&& buffer)
    {
       context ctx{};
       ctx.current_file = file_name;
 
-      std::string buffer;
       const auto ec = file_to_buffer(buffer, ctx.current_file);
 
       if (bool(ec)) {

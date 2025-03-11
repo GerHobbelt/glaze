@@ -19,9 +19,28 @@
 #include "glaze/json/write.hpp"
 #include "ut/ut.hpp"
 
+using namespace ut;
+
+struct test_struct
+{
+   Eigen::Matrix3d d = Eigen::Matrix3d::Identity();
+} test_value;
+
+suite matrix3d = [] {
+   "eigen Matrix3d"_test = [] {
+      auto result = glz::write_json(test_value.d).value();
+      expect(result == "[1,0,0,0,1,0,0,0,1]") << result;
+
+      static_assert(glz::reflect<test_struct>::size == 1);
+      static_assert(glz::reflect<test_struct>::keys[0] == "d");
+
+      result = glz::write_json(test_value).value();
+      expect(result == R"({"d":[1,0,0,0,1,0,0,0,1]})") << result;
+   };
+};
+
 int main()
 {
-   using namespace ut;
    "write_json"_test = [] {
       Eigen::Matrix<double, 2, 2> m{};
       m << 5, 1, 1, 7;
@@ -129,7 +148,21 @@ int main()
       expect(not glz::write_beve(m, b));
       Eigen::MatrixXcd e(3, 3);
       expect(!glz::read_beve(e, b));
-      const bool boolean = m == e;
-      expect(boolean);
+      expect(bool(m == e));
+   };
+
+   "Eigen::Ref"_test = [] {
+      Eigen::VectorXcd source(10);
+      for (int i = 0; i < source.size(); ++i) {
+         source[i] = {double(i), 2 * double(i)};
+      }
+
+      Eigen::Ref<Eigen::VectorXcd> m = source;
+
+      std::string b;
+      expect(not glz::write_beve(m, b));
+      Eigen::VectorXcd e{};
+      expect(!glz::read_beve(e, b));
+      expect(bool(m == e));
    };
 }

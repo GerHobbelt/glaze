@@ -3121,15 +3121,21 @@ suite raw_json_tests = [] {
       std::string s;
       expect(not glz::write_json(v, s));
       expect(s == R"([0,1,2])");
-      expect(glz::read_json(v, s) == glz::error_code::none);
+      expect(not glz::read_json(v, s));
    };
    "raw_json_view_read"_test = [] {
       std::vector<glz::raw_json_view> v{};
       std::string s = R"([0,1,2])";
-      expect(glz::read_json(v, s) == glz::error_code::none);
+      expect(not glz::read_json(v, s));
       expect(v[0].str == "0");
       expect(v[1].str == "1");
       expect(v[2].str == "2");
+   };
+   "glz::raw_json"_test = [] {
+      glz::raw_json v{};
+      std::string s = R"(12345678)";
+      expect(not glz::read_json(v, s));
+      expect(v.str == "12345678");
    };
 };
 
@@ -3329,7 +3335,7 @@ suite tagged_variant_tests = [] {
       auto s = glz::write_json_schema<tagged_variant>().value_or("error");
       expect(
          s ==
-         R"({"type":["object"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"action":{"const":"PUT"},"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"}},"additionalProperties":false,"required":["action"]},{"type":["object"],"properties":{"action":{"const":"DELETE"},"data":{"$ref":"#/$defs/std::string"}},"additionalProperties":false,"required":["action"]}]})")
+         R"({"type":["object"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"action":{"const":"PUT"},"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"}},"additionalProperties":false,"required":["action"],"title":"PUT"},{"type":["object"],"properties":{"action":{"const":"DELETE"},"data":{"$ref":"#/$defs/std::string"}},"additionalProperties":false,"required":["action"],"title":"DELETE"}]})")
          << s;
    };
 
@@ -3364,7 +3370,7 @@ suite tagged_variant_tests = [] {
       const auto schema = glz::write_json_schema<std::shared_ptr<tagged_variant2>>().value_or("error");
       expect(
          schema ==
-         R"({"type":["object","null"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"type":{"const":"put_action"}},"additionalProperties":false,"required":["type"]},{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::string"},"type":{"const":"delete_action"}},"additionalProperties":false,"required":["type"]},{"type":["null"],"const":null}]})")
+         R"({"type":["object","null"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"type":{"const":"put_action"}},"additionalProperties":false,"required":["type"],"title":"put_action"},{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::string"},"type":{"const":"delete_action"}},"additionalProperties":false,"required":["type"],"title":"delete_action"},{"type":["null"],"title":"std::monostate","const":null}]})")
          << schema;
    };
 };
@@ -3699,6 +3705,13 @@ suite generic_json_tests = [] {
       expect(glz::write_json(json).value() == R"("Hello")");
       json = std::string_view{"World"};
       expect(glz::write_json(json).value() == R"("World")");
+   };
+
+   "json_t int"_test = [] {
+      glz::json_t json = 55;
+      expect(glz::write_json(json).value() == "55");
+      json = 44;
+      expect(glz::write_json(json).value() == "44");
    };
 };
 
@@ -4374,7 +4387,7 @@ suite json_schema = [] {
       // when you update this string
       expect(
          schema ==
-         R"({"type":["object"],"properties":{"array":{"$ref":"#/$defs/std::array<std::string,4>"},"b":{"$ref":"#/$defs/bool"},"c":{"$ref":"#/$defs/char"},"color":{"$ref":"#/$defs/Color"},"d":{"$ref":"#/$defs/double"},"deque":{"$ref":"#/$defs/std::deque<double>"},"i":{"$ref":"#/$defs/int32_t"},"list":{"$ref":"#/$defs/std::list<int32_t>"},"map":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"mapi":{"$ref":"#/$defs/std::map<int32_t,double>"},"optional":{"$ref":"#/$defs/std::optional<V3>"},"sptr":{"$ref":"#/$defs/std::shared_ptr<sub_thing>"},"thing":{"$ref":"#/$defs/sub_thing"},"thing2array":{"$ref":"#/$defs/std::array<sub_thing2,1>"},"thing_ptr":{"$ref":"#/$defs/sub_thing*"},"v":{"$ref":"#/$defs/std::variant<var1_t,var2_t>"},"vb":{"$ref":"#/$defs/std::vector<bool>"},"vec3":{"$ref":"#/$defs/V3"},"vector":{"$ref":"#/$defs/std::vector<V3>"}},"additionalProperties":false,"$defs":{"Color":{"type":["string"],"oneOf":[{"title":"Red","const":"Red"},{"title":"Green","const":"Green"},{"title":"Blue","const":"Blue"}]},"V3":{"type":["array"]},"bool":{"type":["boolean"]},"char":{"type":["string"]},"double":{"type":["number"],"minimum":-1.7976931348623157E308,"maximum":1.7976931348623157E308},"float":{"type":["number"],"minimum":-3.4028234663852886E38,"maximum":3.4028234663852886E38},"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::array<std::string,4>":{"type":["array"],"items":{"$ref":"#/$defs/std::string"},"minItems":4,"maxItems":4},"std::array<sub_thing2,1>":{"type":["array"],"items":{"$ref":"#/$defs/sub_thing2"},"minItems":1,"maxItems":1},"std::deque<double>":{"type":["array"],"items":{"$ref":"#/$defs/double"}},"std::list<int32_t>":{"type":["array"],"items":{"$ref":"#/$defs/int32_t"}},"std::map<int32_t,double>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/double"}},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::optional<V3>":{"type":["array","null"]},"std::shared_ptr<sub_thing>":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"std::string":{"type":["string"]},"std::variant<var1_t,var2_t>":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"x":{"$ref":"#/$defs/double"}},"additionalProperties":false},{"type":["object"],"properties":{"y":{"$ref":"#/$defs/double"}},"additionalProperties":false}]},"std::vector<V3>":{"type":["array"],"items":{"$ref":"#/$defs/V3"}},"std::vector<bool>":{"type":["array"],"items":{"$ref":"#/$defs/bool"}},"sub_thing":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing*":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing2":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"},"c":{"$ref":"#/$defs/double"},"d":{"$ref":"#/$defs/double"},"e":{"$ref":"#/$defs/double"},"f":{"$ref":"#/$defs/float"},"g":{"$ref":"#/$defs/double"},"h":{"$ref":"#/$defs/double"}},"additionalProperties":false}},"examples":[{"thing":{},"i":42}],"required":["thing","i"]})")
+         R"({"type":["object"],"properties":{"array":{"$ref":"#/$defs/std::array<std::string,4>"},"b":{"$ref":"#/$defs/bool"},"c":{"$ref":"#/$defs/char"},"color":{"$ref":"#/$defs/Color"},"d":{"$ref":"#/$defs/double"},"deque":{"$ref":"#/$defs/std::deque<double>"},"i":{"$ref":"#/$defs/int32_t"},"list":{"$ref":"#/$defs/std::list<int32_t>"},"map":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"mapi":{"$ref":"#/$defs/std::map<int32_t,double>"},"optional":{"$ref":"#/$defs/std::optional<V3>"},"sptr":{"$ref":"#/$defs/std::shared_ptr<sub_thing>"},"thing":{"$ref":"#/$defs/sub_thing"},"thing2array":{"$ref":"#/$defs/std::array<sub_thing2,1>"},"thing_ptr":{"$ref":"#/$defs/sub_thing*"},"v":{"$ref":"#/$defs/std::variant<var1_t,var2_t>"},"vb":{"$ref":"#/$defs/std::vector<bool>"},"vec3":{"$ref":"#/$defs/V3"},"vector":{"$ref":"#/$defs/std::vector<V3>"}},"additionalProperties":false,"$defs":{"Color":{"type":["string"],"oneOf":[{"title":"Red","const":"Red"},{"title":"Green","const":"Green"},{"title":"Blue","const":"Blue"}]},"V3":{"type":["array"]},"bool":{"type":["boolean"]},"char":{"type":["string"]},"double":{"type":["number"],"minimum":-1.7976931348623157E308,"maximum":1.7976931348623157E308},"float":{"type":["number"],"minimum":-3.4028234663852886E38,"maximum":3.4028234663852886E38},"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::array<std::string,4>":{"type":["array"],"items":{"$ref":"#/$defs/std::string"},"minItems":4,"maxItems":4},"std::array<sub_thing2,1>":{"type":["array"],"items":{"$ref":"#/$defs/sub_thing2"},"minItems":1,"maxItems":1},"std::deque<double>":{"type":["array"],"items":{"$ref":"#/$defs/double"}},"std::list<int32_t>":{"type":["array"],"items":{"$ref":"#/$defs/int32_t"}},"std::map<int32_t,double>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/double"}},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::optional<V3>":{"type":["array","null"]},"std::shared_ptr<sub_thing>":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"std::string":{"type":["string"]},"std::variant<var1_t,var2_t>":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"x":{"$ref":"#/$defs/double"}},"additionalProperties":false,"title":"var1_t"},{"type":["object"],"properties":{"y":{"$ref":"#/$defs/double"}},"additionalProperties":false,"title":"var2_t"}]},"std::vector<V3>":{"type":["array"],"items":{"$ref":"#/$defs/V3"}},"std::vector<bool>":{"type":["array"],"items":{"$ref":"#/$defs/bool"}},"sub_thing":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing*":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing2":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"},"c":{"$ref":"#/$defs/double"},"d":{"$ref":"#/$defs/double"},"e":{"$ref":"#/$defs/double"},"f":{"$ref":"#/$defs/float"},"g":{"$ref":"#/$defs/double"},"h":{"$ref":"#/$defs/double"}},"additionalProperties":false}},"examples":[{"thing":{},"i":42}],"required":["thing","i"]})")
          << schema;
    };
 };
@@ -4458,6 +4471,20 @@ struct glz::meta<question_t>
    static constexpr auto value = object("ᇿ", &T::text);
 };
 
+struct question_escaped_t
+{
+   std::string text{};
+};
+
+template <>
+struct glz::meta<question_escaped_t>
+{
+   using T = question_escaped_t;
+   static constexpr auto value = object("ᇿ", &T::text, escape_unicode<"ᇿ">, &T::text);
+};
+
+static_assert(glz::escape_unicode<"ᇿ"> == R"(\u11FF)");
+
 suite unicode_tests = [] {
    "unicode"_test = [] {
       std::string str = "😀😃😄🍌💐🌹🥀🌺🌷🌸💮🏵️🌻🌼";
@@ -4466,7 +4493,7 @@ suite unicode_tests = [] {
       expect(not glz::write_json(str, buffer));
 
       str.clear();
-      expect(glz::read_json(str, buffer) == glz::error_code::none);
+      expect(not glz::read_json(str, buffer));
 
       expect(str == "😀😃😄🍌💐🌹🥀🌺🌷🌸💮🏵️🌻🌼");
    };
@@ -4474,7 +4501,7 @@ suite unicode_tests = [] {
    "unicode_unescaped_smile"_test = [] {
       std::string str = R"({"😀":"smile"})";
       unicode_keys_t obj{};
-      expect(glz::read_json(obj, str) == glz::error_code::none);
+      expect(not glz::read_json(obj, str));
 
       expect(obj.happy == "smile");
    };
@@ -4489,15 +4516,15 @@ suite unicode_tests = [] {
    "unicode_unescaped"_test = [] {
       std::string str = R"({"ᇿ":"ᇿ"})";
       question_t obj{};
-      expect(glz::read_json(obj, str) == glz::error_code::none);
+      expect(not glz::read_json(obj, str));
 
       expect(obj.text == "ᇿ");
    };
 
    "unicode_escaped"_test = [] {
       std::string str = R"({"\u11FF":"\u11FF"})";
-      question_t obj{};
-      expect(glz::read<glz::opts{.escaped_unicode_key_conversion = true}>(obj, str) == glz::error_code::none);
+      question_escaped_t obj{};
+      expect(not glz::read_json(obj, str));
 
       expect(obj.text == "ᇿ");
    };
@@ -6851,7 +6878,7 @@ suite empty_variant_objects = [] {
       const auto s = glz::write_json_schema<var_schema>().value_or("error");
       expect(
          s ==
-         R"({"type":["object"],"properties":{"$schema":{"$ref":"#/$defs/std::string"},"variant":{"$ref":"#/$defs/vari"}},"additionalProperties":false,"$defs":{"std::string":{"type":["string"]},"vari":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"type":{"const":"varx"}},"additionalProperties":false,"required":["type"]},{"type":["object"],"properties":{"type":{"const":"vary"}},"additionalProperties":false,"required":["type"]}]}}})")
+         R"({"type":["object"],"properties":{"$schema":{"$ref":"#/$defs/std::string"},"variant":{"$ref":"#/$defs/vari"}},"additionalProperties":false,"$defs":{"std::string":{"type":["string"]},"vari":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"type":{"const":"varx"}},"additionalProperties":false,"required":["type"],"title":"varx"},{"type":["object"],"properties":{"type":{"const":"vary"}},"additionalProperties":false,"required":["type"],"title":"vary"}]}}})")
          << s;
    };
 };
@@ -7180,6 +7207,24 @@ struct glz::meta<unknown_fields_2>
    static constexpr auto unknown_read{&T::extra};
 };
 
+struct my_unknown_struct
+{
+   int i = 287;
+   std::unordered_map<std::string, std::string> unknown;
+};
+
+template <>
+struct glz::meta<my_unknown_struct>
+{
+   using T = my_unknown_struct;
+   static constexpr auto value = glz::object("i", &T::i);
+
+   static constexpr auto unknown_write{&T::unknown};
+   // static constexpr auto unknown_read{
+   //     &T::unknown
+   // };
+};
+
 suite unknown_fields_member_test = [] {
    "decode_unknown"_test = [] {
       unknown_fields_member obj{};
@@ -7215,6 +7260,18 @@ suite unknown_fields_member_test = [] {
       std::string out{};
       expect(not glz::write_json(obj, out));
       expect(out == R"({"unk":"zzz","unk2":{"sub":3,"sub2":[{"a":"b"}]},"unk3":[]})") << out;
+   };
+
+   "my_unknown_struct"_test = [] {
+      my_unknown_struct obj;
+      std::string buffer;
+      expect(not glz::write<glz::opts{.prettify = true}>(obj, buffer));
+      expect(buffer == R"({
+   "i": 287
+})") << buffer;
+
+      expect(not glz::write<glz::opts{}>(obj, buffer));
+      expect(buffer == R"({"i":287})") << buffer;
    };
 };
 
@@ -7748,13 +7805,13 @@ suite address_sanitizer_test = [] {
 
    "invalid json_t read 1"_test = [] {
       glz::json_t json{};
-      auto blah = std::vector<char>{0x22, 0x5c, char(0xff), 0x22, 0x00};
+      auto blah = std::vector<char>{0x22, 0x5c, static_cast<char>(0xff), 0x22, 0x00};
       expect(glz::read_json(json, blah));
    };
 
    "invalid json_t 2"_test = [] {
       glz::json_t json{};
-      auto blah = std::vector<char>{0x22, 0x5c, 0x75, char(0xff), 0x22, 0x00};
+      auto blah = std::vector<char>{0x22, 0x5c, 0x75, static_cast<char>(0xff), 0x22, 0x00};
       expect(glz::read_json(json, blah));
    };
 
@@ -8230,6 +8287,15 @@ struct zoo_reflection_t
    std::string name{"My Awesome Zoo"};
 };
 
+struct partial_write_tester
+{
+   int magnitude{};
+   int thresh_hi{};
+   int thresh_lo{};
+   int option_one{};
+   int option_two{};
+};
+
 suite partial_write_tests = [] {
    "partial write"_test = [] {
       static constexpr auto partial = glz::json_ptrs("/name", "/animals/tiger");
@@ -8268,6 +8334,14 @@ suite partial_write_tests = [] {
       const auto length = glz::write_json<json_ptrs>(obj, buf);
       expect(length.has_value());
       expect(std::string_view{buf} == R"({"name":"My Awesome Zoo"})");
+   };
+
+   "partial_write_tester"_test = [] {
+      static constexpr auto partial = glz::json_ptrs("/magnitude", "/thresh_hi", "/thresh_lo");
+      partial_write_tester obj{};
+      std::string buffer{};
+      expect(not glz::write_json<partial>(obj, buffer));
+      expect(buffer == R"({"magnitude":0,"thresh_hi":0,"thresh_lo":0})") << buffer;
    };
 };
 
