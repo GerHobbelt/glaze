@@ -124,8 +124,8 @@ struct glz::meta<sub_thing2>
 {
    using T = sub_thing2;
    static constexpr std::string_view name = "sub_thing2";
-   static constexpr auto value = object("a", &T::a, "Test comment 1", //
-                                        "b", &T::b, "Test comment 2", //
+   static constexpr auto value = object("a", &T::a, //
+                                        "b", &T::b, //
                                         "c", &T::c, //
                                         "d", &T::d, //
                                         "e", &T::e, //
@@ -1203,7 +1203,7 @@ suite user_types = [] {
       "b": "stuff"
    }
 })";
-      expect(thing_pretty == buffer);
+      expect(thing_pretty == buffer) << buffer;
    };
 
    "complex user obect opts prettify, new_lines_in_arrays = false"_test = [] {
@@ -1517,7 +1517,7 @@ suite user_types = [] {
 
    "complex user obect member names"_test = [] {
       expect(glz::name_v<glz::detail::member_tuple_t<Thing>> ==
-             "glz::tuplet::tuple<sub_thing,std::array<sub_thing2,1>,V3,std::list<int32_t>,std::deque<double>,std::"
+             "glz::tuple<sub_thing,std::array<sub_thing2,1>,V3,std::list<int32_t>,std::deque<double>,std::"
              "vector<V3>,int32_t,double,bool,char,std::variant<var1_t,var2_t>,Color,std::vector<bool>,std::shared_ptr<"
              "sub_thing>,std::optional<V3>,std::array<std::string,4>,std::map<std::string,int32_t>,std::map<int32_t,"
              "double>,sub_thing>");
@@ -1619,20 +1619,19 @@ suite json_pointer = [] {
    };
 
    "valid"_test = [] {
-      [[maybe_unused]] constexpr bool is_valid = glz::valid<Thing, "/thing/a", double>(); // Verify constexpr
+      // Compile time JSON Pointer syntax validation
+      static_assert(glz::valid<Thing, "/thing_ptr/a", double>());
+      static_assert(glz::valid<Thing, "/thing_ptr/a", int>() == false);
+      static_assert(glz::valid<Thing, "/thing_ptr/b">());
+      static_assert(glz::valid<Thing, "/thing_ptr/z">() == false);
 
-      expect(glz::valid<Thing, "/thing_ptr/a", double>() == true);
-      expect(glz::valid<Thing, "/thing_ptr/a", int>() == false);
-      expect(glz::valid<Thing, "/thing_ptr/b">() == true);
-      expect(glz::valid<Thing, "/thing_ptr/z">() == false);
+      static_assert(glz::valid<Thing, "/vec3/2", double>());
+      static_assert(glz::valid<Thing, "/vec3/3", double>() == false);
 
-      expect(glz::valid<Thing, "/vec3/2", double>() == true);
-      expect(glz::valid<Thing, "/vec3/3", double>() == false);
-
-      expect(glz::valid<Thing, "/map/f", int>() == true);
-      expect(glz::valid<Thing, "/vector", std::vector<V3>>() == true);
-      expect(glz::valid<Thing, "/vector/1", V3>() == true);
-      expect(glz::valid<Thing, "/vector/1/0", double>() == true);
+      static_assert(glz::valid<Thing, "/map/f", int>());
+      static_assert(glz::valid<Thing, "/vector", std::vector<V3>>());
+      static_assert(glz::valid<Thing, "/vector/1", V3>());
+      static_assert(glz::valid<Thing, "/vector/1/0", double>());
    };
 
    "id bug"_test = [] {
@@ -2980,7 +2979,6 @@ struct glz::meta<study_obj>
    static constexpr auto value = object("x", &T::x, "y", &T::y);
 };
 
-// TODO: Figure out why the thread pool can randomly hang, especially on Windows GitHub actions
 suite study_tests = [] {
    "study"_test = [] {
       glz::study::design design;
@@ -5799,6 +5797,11 @@ suite numeric_enums_suite = [] {
    };
 };
 
+struct data_type
+{
+   std::string hello;
+};
+
 suite json_logging = [] {
    "json_logging"_test = [] {
       glz::arr vec = {1, 2, 3};
@@ -5854,6 +5857,19 @@ suite json_logging = [] {
       expect(not glz::write_json(merged, s));
 
       expect(s == R"({"pi":3.141,"a":0,"b":2,"c":3,"i":287,"d":3.14,"hello":"Hello World","arr":[1,2,3]})") << s;
+   };
+
+   "merged potentiallyContainsUnknownJSON"_test = [] {
+      data_type data{};
+      std::vector<int> my_arr;
+      std::map<std::string_view, glz::raw_json_view> potentiallyContainsUnknownJSON;
+
+      data.hello = "goodbye";
+      std::string buffer{};
+      expect(not glz::write_json(glz::merge{glz::obj{"my_arr", my_arr, "data", data}, potentiallyContainsUnknownJSON},
+                                 buffer));
+
+      expect(buffer == R"({"my_arr":[],"data":{"hello":"goodbye"}})") << buffer;
    };
 };
 
@@ -6139,11 +6155,8 @@ suite char_buffer = [] {
 static_assert(!glz::detail::char_array_t<char*>);
 
 suite enum_map = [] {
-   "enum map"_test = [] {
-      std::map<Color, std::string> color_map;
-      color_map[Color::Red] = "red";
-      color_map[Color::Green] = "green";
-      color_map[Color::Blue] = "blue";
+   "enum map key"_test = [] {
+      std::map<Color, std::string> color_map{{Color::Red, "red"}, {Color::Green, "green"}, {Color::Blue, "blue"}};
 
       std::string s{};
       expect(not glz::write_json(color_map, s));
@@ -6155,6 +6168,48 @@ suite enum_map = [] {
       expect(color_map.at(Color::Red) == "red");
       expect(color_map.at(Color::Green) == "green");
       expect(color_map.at(Color::Blue) == "blue");
+   };
+
+   "enum map key vector pair concatenate"_test = [] {
+      std::vector<std::pair<Color, std::string>> colors{
+         {Color::Red, "red"}, {Color::Green, "green"}, {Color::Blue, "blue"}};
+
+      std::string s{};
+      expect(not glz::write_json(colors, s));
+
+      expect(s == R"({"Red":"red","Green":"green","Blue":"blue"})");
+
+      auto expected = colors;
+      colors.clear();
+      expect(!glz::read_json(colors, s));
+      expect(colors == expected);
+   };
+
+   "enum map value"_test = [] {
+      std::map<int, Color> color_map{{0, Color::Red}, {1, Color::Green}, {2, Color::Blue}};
+
+      std::string s{};
+      expect(not glz::write_json(color_map, s));
+
+      expect(s == R"({"0":"Red","1":"Green","2":"Blue"})");
+
+      auto expectedMap = color_map;
+      color_map.clear();
+      expect(!glz::read_json(color_map, s));
+      expect(expectedMap == color_map);
+   };
+
+   "enum map value vector pair concatenate"_test = [] {
+      std::vector<std::pair<int, Color>> colors{{0, Color::Red}, {1, Color::Green}, {2, Color::Blue}};
+
+      std::string s{};
+      expect(not glz::write_json(colors, s));
+      expect(s == R"({"0":"Red","1":"Green","2":"Blue"})");
+
+      auto expected = colors;
+      colors.clear();
+      expect(!glz::read_json(colors, s));
+      expect(colors == expected);
    };
 };
 
@@ -7878,22 +7933,10 @@ struct Header
    std::string type{};
 };
 
-template <>
-struct glz::meta<Header>
-{
-   static constexpr auto partial_read = true;
-};
-
 struct HeaderFlipped
 {
    std::string type{};
    std::string id{};
-};
-
-template <>
-struct glz::meta<HeaderFlipped>
-{
-   static constexpr auto partial_read = true;
 };
 
 struct NestedPartialRead
@@ -7906,11 +7949,13 @@ struct NestedPartialRead
 suite partial_read_tests = [] {
    using namespace ut;
 
+   static constexpr glz::opts partial_read{.partial_read = true};
+
    "partial read"_test = [] {
       Header h{};
       std::string buf = R"({"id":"51e2affb","type":"message_type","unknown key":"value"})";
 
-      expect(!glz::read_json(h, buf));
+      expect(!glz::read<partial_read>(h, buf));
       expect(h.id == "51e2affb");
       expect(h.type == "message_type");
    };
@@ -7920,7 +7965,7 @@ suite partial_read_tests = [] {
       // closing curly bracket is missing
       std::string buf = R"({"id":"51e2affb","type":"message_type","unknown key":"value")";
 
-      expect(!glz::read_json(h, buf));
+      expect(!glz::read<partial_read>(h, buf));
       expect(h.id == "51e2affb");
       expect(h.type == "message_type");
    };
@@ -7929,7 +7974,7 @@ suite partial_read_tests = [] {
       Header h{};
       std::string buf = R"({"id":"51e2affb","unknown key":"value","type":"message_type"})";
 
-      expect(glz::read_json(h, buf) == glz::error_code::unknown_key);
+      expect(glz::read<partial_read>(h, buf) == glz::error_code::unknown_key);
       expect(h.id == "51e2affb");
       expect(h.type.empty());
    };
@@ -7938,7 +7983,7 @@ suite partial_read_tests = [] {
       Header h{};
       std::string buf = R"({"id":"51e2affb","unknown key":"value","type":"message_type"})";
 
-      expect(!glz::read<glz::opts{.error_on_unknown_keys = false}>(h, buf));
+      expect(!glz::read<glz::opts{.error_on_unknown_keys = false, .partial_read = true}>(h, buf));
       expect(h.id == "51e2affb");
       expect(h.type == "message_type");
    };
@@ -7947,7 +7992,7 @@ suite partial_read_tests = [] {
       Header h{};
       std::string buf = R"({"id":"51e2affb","unknown key":"value","type":"message_type"garbage})";
 
-      expect(!glz::read<glz::opts{.error_on_unknown_keys = false}>(h, buf));
+      expect(!glz::read<glz::opts{.error_on_unknown_keys = false, .partial_read = true}>(h, buf));
       expect(h.id == "51e2affb");
       expect(h.type == "message_type");
    };
@@ -7956,7 +8001,8 @@ suite partial_read_tests = [] {
       Header h{};
       std::string buf = R"({"id":"51e2affb","unknown key":"value"})";
 
-      expect(glz::read<glz::opts{.error_on_unknown_keys = false}>(h, buf) != glz::error_code::missing_key);
+      expect(glz::read<glz::opts{.error_on_unknown_keys = false, .partial_read = true}>(h, buf) !=
+             glz::error_code::missing_key);
       expect(h.id == "51e2affb");
       expect(h.type.empty());
    };
@@ -7965,7 +8011,7 @@ suite partial_read_tests = [] {
       Header h{};
       std::string buf = R"({"id":"51e2affb","unknown key":"value"})";
 
-      expect(!glz::read<glz::opts{.error_on_unknown_keys = false, .error_on_missing_keys = false}>(h, buf));
+      expect(!glz::read<glz::opts{.error_on_unknown_keys = false, .partial_read = true}>(h, buf));
       expect(h.id == "51e2affb");
       expect(h.type.empty());
    };
@@ -7974,7 +8020,7 @@ suite partial_read_tests = [] {
       HeaderFlipped h{};
       std::string buf = R"({"id":"51e2affb","type":"message_type","unknown key":"value"})";
 
-      expect(!glz::read_json(h, buf));
+      expect(not glz::read<partial_read>(h, buf));
       expect(h.id == "51e2affb");
       expect(h.type == "message_type");
    };
@@ -7983,7 +8029,7 @@ suite partial_read_tests = [] {
       HeaderFlipped h{};
       std::string buf = R"({"id":"51e2affb","unknown key":"value","type":"message_type"})";
 
-      expect(glz::read_json(h, buf) == glz::error_code::unknown_key);
+      expect(glz::read<partial_read>(h, buf) == glz::error_code::unknown_key);
       expect(h.id == "51e2affb");
       expect(h.type.empty());
    };
@@ -7992,7 +8038,8 @@ suite partial_read_tests = [] {
       HeaderFlipped h{};
       std::string buf = R"({"id":"51e2affb","unknown key":"value","type":"message_type","another_field":409845})";
 
-      expect(glz::read<glz::opts{.error_on_unknown_keys = false}>(h, buf) == glz::error_code::none);
+      expect(glz::read<glz::opts{.error_on_unknown_keys = false, .partial_read = true}>(h, buf) ==
+             glz::error_code::none);
       expect(h.id == "51e2affb");
       expect(h.type == "message_type");
    };
@@ -8001,27 +8048,18 @@ suite partial_read_tests = [] {
 suite nested_partial_read_tests = [] {
    using namespace ut;
 
+   static constexpr glz::opts partial_read{.partial_read = true};
+
    "nested object partial read"_test = [] {
       NestedPartialRead n{};
       std::string buf =
          R"({"method":"m1","header":{"id":"51e2affb","type":"message_type","unknown key":"value"},"number":51})";
 
-      expect(glz::read_json(n, buf) == glz::error_code::unknown_key);
+      expect(not glz::read<partial_read>(n, buf));
       expect(n.method == "m1");
       expect(n.header.id == "51e2affb");
       expect(n.header.type == "message_type");
       expect(n.number == 0);
-   };
-
-   "nested object partial read 2"_test = [] {
-      NestedPartialRead n{};
-      std::string buf =
-         R"({"method":"m1","header":{"id":"51e2affb","type":"message_type","unknown key":"value"},"number":51})";
-
-      expect(!glz::read<glz::opts{.partial_read_nested = true}>(n, buf));
-      expect(n.method == "m1");
-      expect(n.header.id == "51e2affb");
-      expect(n.header.type == "message_type");
    };
 
    "nested object partial read, don't read garbage"_test = [] {
@@ -8029,10 +8067,48 @@ suite nested_partial_read_tests = [] {
       std::string buf =
          R"({"method":"m1","header":{"id":"51e2affb","type":"message_type","unknown key":"value",garbage},"number":51})";
 
-      expect(!glz::read<glz::opts{.partial_read_nested = true}>(n, buf));
+      expect(not glz::read<partial_read>(n, buf));
       expect(n.method == "m1");
       expect(n.header.id == "51e2affb");
       expect(n.header.type == "message_type");
+      expect(n.number == 0);
+   };
+};
+
+struct array_holder_t
+{
+   std::vector<int> x{0, 0, 0, 0, 0};
+   std::vector<int> y{0};
+};
+
+suite nested_array_partial_read_tests = [] {
+   using namespace ut;
+
+   static constexpr glz::opts partial_read{.partial_read = true};
+
+   "nested array partial read"_test = [] {
+      std::vector<std::vector<int>> v{{0, 0}};
+      std::string buf = "[[1,2],[3,4],[5,6]]";
+
+      expect(not glz::read<partial_read>(v, buf));
+      expect(v.size() == 1);
+      expect(v[0].size() == 2);
+      expect(v[0][0] == 1);
+      expect(v[0][1] == 2);
+   };
+
+   "array_holder_t"_test = [] {
+      array_holder_t obj{};
+      std::string buf = R"({"x":[1,2,3],"y":[1,2,3,4]})";
+
+      auto ec = glz::read<partial_read>(obj, buf);
+      expect(not ec) << glz::format_error(ec, buf);
+      expect(obj.x.size() == 3);
+      expect(obj.x[0] == 1);
+      expect(obj.x[1] == 2);
+      expect(obj.x[2] == 3);
+      expect(obj.y.size() == 1);
+      expect(obj.y[0] == 1);
    };
 };
 
@@ -8046,7 +8122,6 @@ template <>
 struct glz::meta<AccountUpdateInner>
 {
    using T = AccountUpdateInner;
-   static constexpr auto partial_read = true;
    static constexpr auto value = object("a", &T::a, "wb", glz::quoted_num<&T::wb>);
 };
 
@@ -8063,8 +8138,7 @@ struct AccountUpdate
 
 inline void AccountUpdate::fromJson(AccountUpdate& accountUpdate, const std::string& jSon)
 {
-   auto ec = glz::read<glz::opts{.error_on_unknown_keys = false, .raw_string = true, .partial_read_nested = true}>(
-      accountUpdate, jSon);
+   auto ec = glz::read<glz::opts{.error_on_unknown_keys = false, .raw_string = true}>(accountUpdate, jSon);
    expect(not ec) << glz::format_error(ec, jSon);
 }
 
@@ -8095,6 +8169,9 @@ suite account_update_partial_read_tests = [] {
 
       AccountUpdate obj{};
       AccountUpdate::fromJson(obj, json);
+
+      expect(std::string_view{obj.a.B.at(0).a} == "USDT");
+      expect(std::string_view{obj.a.B.at(1).a} == "BUSD");
    };
 };
 
@@ -9050,6 +9127,15 @@ suite read_allocated_tests = [] {
       expect(obj.string == "ha!");
       expect(obj.integer == 400);
    };
+
+   "nested partial_struct"_test = [] {
+      std::map<std::string, partial_struct> obj{{"one", {"ONE", 1}}, {"two", {"TWO", 2}}};
+      std::string s = R"({"zero":{}, "one":{"skip":null,"integer":400,"string":"ha!","skip again":[1,2,3]}})";
+      auto ec = glz::read<glz::opts{.error_on_unknown_keys = false, .partial_read = true}>(obj, s);
+      expect(!ec) << glz::format_error(ec, s);
+      expect(obj.at("one").string == "ha!");
+      expect(obj.at("one").integer == 400);
+   };
 };
 
 struct Trade
@@ -9997,6 +10083,37 @@ suite variant_tag_tests = [] {
       if (not x.has_value()) {
          std::cerr << glz::format_error(x.error(), *xString);
       }
+   };
+};
+
+struct birds
+{
+   std::string crow{};
+   std::string sparrow{};
+   std::string hawk{};
+};
+
+template <>
+struct glz::meta<birds>
+{
+   using T = birds;
+   static constexpr std::array keys{"crow", "sparrow", "hawk"};
+   static constexpr glz::tuple value{&T::crow, &T::sparrow, &T::hawk};
+};
+
+suite meta_keys_for_struct = [] {
+   "meta_keys birds"_test = [] {
+      birds obj{"caw", "chirp", "screech"};
+
+      std::string buffer{};
+      expect(not glz::write_json(obj, buffer));
+      expect(buffer == R"({"crow":"caw","sparrow":"chirp","hawk":"screech"})") << buffer;
+
+      obj = {};
+      expect(not glz::read_json(obj, buffer));
+      expect(obj.crow == "caw");
+      expect(obj.sparrow == "chirp");
+      expect(obj.hawk == "screech");
    };
 };
 

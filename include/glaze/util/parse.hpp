@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cstring>
 #include <iterator>
 #include <span>
@@ -779,6 +780,97 @@ namespace glz::detail
    }
 
    template <opts Opts>
+      requires(has_is_padded(Opts))
+   GLZ_ALWAYS_INLINE void skip_string(is_context auto&& ctx, auto&& it, auto&& end) noexcept
+   {
+      if constexpr (!has_opening_handled(Opts)) {
+         ++it;
+      }
+
+      if constexpr (Opts.validate_skipped) {
+         while (true) {
+            uint64_t swar{};
+            std::memcpy(&swar, it, 8);
+
+            constexpr uint64_t lo7_mask = repeat_byte8(0b01111111);
+            const uint64_t lo7 = swar & lo7_mask;
+            const uint64_t backslash = (lo7 ^ repeat_byte8('\\')) + lo7_mask;
+            const uint64_t quote = (lo7 ^ repeat_byte8('"')) + lo7_mask;
+            const uint64_t less_32 = (swar & repeat_byte8(0b01100000)) + lo7_mask;
+            uint64_t next = ~((backslash & quote & less_32) | swar);
+            next &= repeat_byte8(0b10000000);
+
+            if (next == 0) {
+               // No special characters in this chunk
+               it += 8;
+               continue;
+            }
+
+            // Find the first occurrence
+            size_t offset = (countr_zero(next) >> 3);
+            it += offset;
+
+            const auto c = *it;
+            if ((c & 0b11100000) == 0) [[unlikely]] {
+               // Invalid control character (<0x20)
+               ctx.error = error_code::syntax_error;
+               return;
+            }
+            else if (c == '"') {
+               // Check if this quote is escaped
+               const auto* p = it - 1;
+               int backslash_count{};
+               // We don't have to worry about rewinding too far because we started with a quote
+               while (*p == '\\') {
+                  ++backslash_count;
+                  --p;
+               }
+               if ((backslash_count & 1) == 0) {
+                  // Even number of backslashes => not escaped => closing quote found
+                  ++it;
+                  return;
+               }
+               else {
+                  // Odd number of backslashes => escaped quote
+                  ++it;
+                  continue;
+               }
+            }
+            else if (c == '\\') {
+               // Handle escape sequence
+               ++it;
+
+               if (*it == 'u') {
+                  ++it;
+                  if (not skip_unicode_code_point(it, end)) [[unlikely]] {
+                     ctx.error = error_code::unicode_escape_conversion_failure;
+                     return;
+                  }
+               }
+               else {
+                  if (not char_unescape_table[uint8_t(*it)]) [[unlikely]] {
+                     ctx.error = error_code::invalid_escape;
+                     return;
+                  }
+                  ++it;
+               }
+            }
+         }
+
+         // If we exit here, we never found a closing quote
+         ctx.error = error_code::unexpected_end;
+      }
+      else {
+         skip_string_view<Opts>(ctx, it, end);
+         if (bool(ctx.error)) [[unlikely]] {
+            return;
+         }
+         ++it; // skip the quote
+      }
+   }
+
+   template <opts Opts>
+      requires(not has_is_padded(Opts))
    GLZ_ALWAYS_INLINE void skip_string(is_context auto&& ctx, auto&& it, auto&& end) noexcept
    {
       if constexpr (!has_opening_handled(Opts)) {
@@ -1199,5 +1291,131 @@ namespace glz::detail
    GLZ_ALWAYS_INLINE constexpr auto round_up_to_multiple(const std::integral auto val) noexcept
    {
       return val + (multiple - (val % multiple)) % multiple;
+   }
+}
+
+namespace glz
+{
+   // TODO: GCC 12 lacks constexpr std::from_chars
+   // Remove this code when dropping GCC 12 support
+   namespace detail
+   {
+      struct from_chars_result
+      {
+         const char* ptr;
+         std::errc ec;
+      };
+
+      inline constexpr int char_to_digit(char c) noexcept
+      {
+         if (c >= '0' && c <= '9') return c - '0';
+         if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+         if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+         return -1;
+      }
+
+      template <class I>
+      constexpr from_chars_result from_chars(const char* first, const char* last, I& value, int base = 10)
+      {
+         from_chars_result result{first, std::errc{}};
+
+         // Basic validation of base
+         if (base < 2 || base > 36) {
+            // Not standard behavior to check base validity here, but let's return invalid_argument
+            result.ec = std::errc::invalid_argument;
+            return result;
+         }
+
+         using U = std::make_unsigned_t<I>;
+         constexpr bool is_signed = std::is_signed<I>::value;
+         constexpr U umax = (std::numeric_limits<U>::max)();
+
+         if (first == last) {
+            // Empty range
+            result.ec = std::errc::invalid_argument;
+            return result;
+         }
+
+         bool negative = false;
+         // Check for sign only if signed type
+         if constexpr (is_signed) {
+            if (*first == '-') {
+               negative = true;
+               ++first;
+            }
+            else if (*first == '+') {
+               ++first;
+            }
+         }
+
+         if (first == last) {
+            // After sign there's nothing
+            result.ec = std::errc::invalid_argument;
+            return result;
+         }
+
+         U acc = 0;
+         bool any = false;
+
+         // We'll do overflow checking as we parse
+         // For accumulation: acc * base + digit
+         // Overflow if acc > (umax - digit)/base
+
+         while (first != last) {
+            int d = char_to_digit(*first);
+            if (d < 0 || d >= base) break;
+
+            // Check overflow before multiplying/adding
+            if (acc > (umax - static_cast<U>(d)) / static_cast<U>(base)) {
+               // Overflow
+               result.ec = std::errc::result_out_of_range;
+               // We still move ptr to the last valid digit parsed
+               result.ptr = first;
+               // No need to parse further; we know it's out of range.
+               return result;
+            }
+
+            acc = acc * base + static_cast<U>(d);
+            any = true;
+            ++first;
+         }
+
+         if (!any) {
+            // No digits parsed
+            result.ec = std::errc::invalid_argument;
+            return result;
+         }
+
+         // If signed and negative, check if result fits
+         if constexpr (is_signed) {
+            using S = std::make_signed_t<U>;
+            // The largest magnitude we can represent in a negative value is (max + 1)
+            // since -(min()) = max() + 1.
+            U limit = static_cast<U>(std::numeric_limits<I>::max()) + 1U;
+            if (negative) {
+               if (acc > limit) {
+                  result.ec = std::errc::result_out_of_range;
+                  result.ptr = first;
+                  return result;
+               }
+               value = static_cast<I>(0 - static_cast<S>(acc));
+            }
+            else {
+               if (acc > static_cast<U>(std::numeric_limits<I>::max())) {
+                  result.ec = std::errc::result_out_of_range;
+                  result.ptr = first;
+                  return result;
+               }
+               value = static_cast<I>(acc);
+            }
+         }
+         else {
+            // Unsigned type
+            value = acc;
+         }
+
+         result.ptr = first;
+         return result;
+      }
    }
 }

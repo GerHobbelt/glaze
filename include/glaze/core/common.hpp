@@ -41,7 +41,7 @@ namespace glz
    template <class... T>
    struct obj final
    {
-      glz::tuplet::tuple<std::conditional_t<std::is_convertible_v<std::decay_t<T>, sv>, sv, T>...> value;
+      glz::tuple<std::conditional_t<std::is_convertible_v<std::decay_t<T>, sv>, sv, T>...> value;
       static constexpr auto glaze_reflect = false;
    };
 
@@ -51,7 +51,7 @@ namespace glz
    template <class... T>
    struct obj_copy final
    {
-      glz::tuplet::tuple<T...> value;
+      glz::tuple<T...> value;
       static constexpr auto glaze_reflect = false;
    };
 
@@ -61,7 +61,7 @@ namespace glz
    template <class... T>
    struct arr final
    {
-      glz::tuplet::tuple<std::conditional_t<std::is_convertible_v<std::decay_t<T>, sv>, sv, T>...> value;
+      glz::tuple<std::conditional_t<std::is_convertible_v<std::decay_t<T>, sv>, sv, T>...> value;
       static constexpr auto glaze_reflect = false;
    };
 
@@ -71,7 +71,7 @@ namespace glz
    template <class... T>
    struct arr_copy final
    {
-      glz::tuplet::tuple<T...> value;
+      glz::tuple<T...> value;
    };
 
    template <class... T>
@@ -81,7 +81,7 @@ namespace glz
    template <class... T>
    struct merge final
    {
-      glz::tuplet::tuple<std::conditional_t<std::is_convertible_v<std::decay_t<T>, sv>, sv, T>...> value;
+      glz::tuple<std::conditional_t<std::is_convertible_v<std::decay_t<T>, sv>, sv, T>...> value;
       static constexpr auto glaze_reflect = false;
    };
 
@@ -146,8 +146,14 @@ namespace glz
    template <class T>
    concept is_member_function_pointer = std::is_member_function_pointer_v<T>;
 
+   template <class T>
+   using core_t = std::remove_cvref_t<T>;
+
    namespace detail
    {
+      // These templates save typing by determining the core type used to select the proper to/from specialization
+      // Long term I would like to remove these detail indirections.
+
       template <uint32_t Format>
       struct read
       {};
@@ -159,7 +165,7 @@ namespace glz
       template <uint32_t Format>
       struct write_partial
       {};
-   } // namespace detail
+   }
 
    // Use std::stringview if you know the buffer is going to outlive this
    template <class string_type = std::string>
@@ -340,6 +346,9 @@ namespace glz
          std::same_as<T, std::nullptr_t> || std::convertible_to<T, std::monostate> || std::same_as<T, std::nullopt_t>;
 
       template <class T>
+      concept always_skipped = is_includer<T> || std::same_as<T, hidden> || std::same_as<T, skip>;
+
+      template <class T>
       concept nullable_t = !meta_value_t<T> && !str_t<T> && requires(T t) {
          bool(t);
          {
@@ -372,7 +381,8 @@ namespace glz
       concept glaze_array_t = glaze_t<T> && is_specialization_v<meta_wrapper_t<T>, Array>;
 
       template <class T>
-      concept glaze_object_t = glaze_t<T> && is_specialization_v<meta_wrapper_t<T>, Object>;
+      concept glaze_object_t = glaze_t<T> && (is_specialization_v<meta_wrapper_t<T>, Object> ||
+                                              (not std::is_enum_v<std::decay_t<T>> && meta_keys<T>));
 
       template <class T>
       concept glaze_enum_t = glaze_t<T> && is_specialization_v<meta_wrapper_t<T>, Enum>;
@@ -387,7 +397,7 @@ namespace glz
       template <class T>
       concept reflectable = std::is_aggregate_v<std::remove_cvref_t<T>> && std::is_class_v<std::remove_cvref_t<T>> &&
                             !(is_no_reflect<T> || glaze_value_t<T> || glaze_object_t<T> || glaze_array_t<T> ||
-                              glaze_flags_t<T> || range<T> || pair_t<T> || null_t<T>);
+                              glaze_flags_t<T> || range<T> || pair_t<T> || null_t<T> || meta_keys<T>);
 
       template <class T>
       concept is_memory_object = is_memory_type<T> && (glaze_object_t<memory_type<T>> || reflectable<memory_type<T>>);
@@ -520,17 +530,17 @@ namespace glz
       }
    }
 
-   constexpr auto array(auto&&... args) noexcept { return detail::Array{glz::tuplet::tuple{conv_sv(args)...}}; }
+   constexpr auto array(auto&&... args) noexcept { return detail::Array{glz::tuple{conv_sv(args)...}}; }
 
    template <class... Args>
    constexpr auto object(Args&&... args) noexcept
    {
-      return detail::Object{tuplet::tuple{std::forward<Args>(args)...}};
+      return detail::Object{tuple{std::forward<Args>(args)...}};
    }
 
-   constexpr auto enumerate(auto&&... args) noexcept { return detail::Enum{tuplet::tuple{args...}}; }
+   constexpr auto enumerate(auto&&... args) noexcept { return detail::Enum{tuple{args...}}; }
 
-   constexpr auto flags(auto&&... args) noexcept { return detail::Flags{tuplet::tuple{args...}}; }
+   constexpr auto flags(auto&&... args) noexcept { return detail::Flags{tuple{args...}}; }
 }
 
 namespace glz
@@ -587,6 +597,7 @@ struct glz::meta<glz::error_code>
                                     "send_error",
                                     "connection_failure",
                                     "end_reached",
+                                    "partial_read_complete",
                                     "no_read_input",
                                     "data_must_be_null_terminated",
                                     "parse_number_failure",
@@ -650,6 +661,7 @@ struct glz::meta<glz::error_code>
                                      send_error, //
                                      connection_failure, //
                                      end_reached, // A non-error code for non-null terminated input buffers
+                                     partial_read_complete,
                                      no_read_input, //
                                      data_must_be_null_terminated, //
                                      parse_number_failure, //

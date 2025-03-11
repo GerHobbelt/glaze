@@ -102,7 +102,7 @@ namespace glz
       concept local_json_schema_t = requires { typename std::decay_t<T>::glaze_json_schema; };
 
       template <class T>
-      concept global_json_schema_t = requires { is_specialization_v<std::decay_t<T>, json_schema>; };
+      concept global_json_schema_t = requires { typename json_schema<T>; };
 
       template <class T>
       concept json_schema_t = local_json_schema_t<T> || global_json_schema_t<T>;
@@ -110,7 +110,7 @@ namespace glz
 
    struct empty
    {
-      static constexpr glz::tuplet::tuple<> value{};
+      static constexpr glz::tuple<> value{};
    };
 
    template <class T>
@@ -140,7 +140,14 @@ namespace glz
    }();
 
    template <class T>
-   inline constexpr auto meta_v = meta_wrapper_v<decay_keep_volatile_t<T>>.value;
+   inline constexpr auto meta_v = []() -> decltype(auto) {
+      if constexpr (detail::meta_keys<T>) {
+         return meta_wrapper_v<decay_keep_volatile_t<T>>;
+      }
+      else {
+         return meta_wrapper_v<decay_keep_volatile_t<T>>.value;
+      }
+   }();
 
    template <class T>
    using meta_t = decay_keep_volatile_t<decltype(meta_v<T>)>;
@@ -297,8 +304,11 @@ namespace glz
       }
    }();
 
-   template <class T>
-   inline constexpr auto json_schema_v = [] {
+   // We don't make this constexpr so that we can have heap allocated values like std::string
+   // IMPORTANT: GCC has a bug that doesn't default instantiate this object when it isn't constexpr
+   // The solution is to use the json_schema_type defined below to instantiate where used.
+   template <detail::json_schema_t T>
+   inline const auto json_schema_v = [] {
       if constexpr (detail::local_json_schema_t<T>) {
          return typename std::decay_t<T>::glaze_json_schema{};
       }
@@ -317,7 +327,4 @@ namespace glz
 
    template <class T>
    concept custom_write = requires { requires meta<T>::custom_write == true; };
-
-   template <class T>
-   concept is_partial_read = requires { requires meta<T>::partial_read == true; };
 }

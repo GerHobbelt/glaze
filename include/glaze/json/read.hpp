@@ -174,11 +174,11 @@ namespace glz
                }
                else {
                   from<JSON, std::remove_cvref_t<V>>::template op<ws_handled<Opts>()>(
-                     get_member(value, get<I>(to_tuple(value))), ctx, it, end);
+                     get_member(value, get<I>(to_tie(value))), ctx, it, end);
                }
             }
 
-            if constexpr (Opts.error_on_missing_keys || is_partial_read<T> || Opts.partial_read) {
+            if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
                ((selected_index = I), ...);
             }
          }
@@ -234,9 +234,7 @@ namespace glz
          constexpr auto type = HashInfo.type;
          constexpr auto N = reflect<T>::size;
 
-         if constexpr (not bool(type)) {
-            static_assert(false_v<T>, "invalid hash algorithm");
-         }
+         static_assert(bool(type), "invalid hash algorithm");
 
          if constexpr (N == 1) {
             decode_index<Opts, T, 0>(value, ctx, it, end, selected_index...);
@@ -266,8 +264,18 @@ namespace glz
                }
             }
 
-            // We see better performance with function pointers than a glz::jump_table here.
-            visit<N>([&]<size_t I>() { decode_index<Opts, T, I>(value, ctx, it, end, selected_index...); }, index);
+            if constexpr (N == 2) {
+               if (index == 0) {
+                  decode_index<Opts, T, 0>(value, ctx, it, end, selected_index...);
+               }
+               else {
+                  decode_index<Opts, T, 1>(value, ctx, it, end, selected_index...);
+               }
+            }
+            else {
+               // We see better performance with function pointers than a glz::jump_table here.
+               visit<N>([&]<size_t I>() { decode_index<Opts, T, I>(value, ctx, it, end, selected_index...); }, index);
+            }
          }
       }
 
@@ -1383,7 +1391,8 @@ namespace glz
 
                using V = std::decay_t<decltype(item)>;
 
-               if constexpr (str_t<typename V::first_type>) {
+               if constexpr (str_t<typename V::first_type> ||
+                             (std::is_enum_v<typename V::first_type> && detail::glaze_t<typename V::first_type>)) {
                   read<JSON>::op<Opts>(item.first, ctx, it, end);
                   if (bool(ctx.error)) [[unlikely]]
                      return;
@@ -1605,18 +1614,22 @@ namespace glz
 
             std::string& s = string_buffer();
 
-            static constexpr auto flag_map = make_map<T>();
+            constexpr auto& HashInfo = detail::hash_info<T>;
+            static_assert(bool(HashInfo.type));
 
             while (true) {
                read<JSON>::op<ws_handled_off<Opts>()>(s, ctx, it, end);
                if (bool(ctx.error)) [[unlikely]]
                   return;
 
-               auto itr = flag_map.find(s);
-               if (itr != flag_map.end()) {
-                  std::visit([&](auto&& x) { get_member(value, x) = true; }, itr->second);
+               const auto index =
+                  decode_hash_with_size<JSON, T, HashInfo, HashInfo.type>::op(s.data(), s.data() + s.size(), s.size());
+
+               constexpr auto N = reflect<T>::size;
+               if (index < N) [[likely]] {
+                  visit<N>([&]<size_t I>() { get_member(value, get<I>(reflect<T>::values)) = true; }, index);
                }
-               else {
+               else [[unlikely]] {
                   ctx.error = error_code::invalid_flag_input;
                   return;
                }
@@ -1765,9 +1778,6 @@ namespace glz
          static void op(auto&& value, is_context auto&& ctx, auto&& it, auto&& end)
          {
             static constexpr auto num_members = reflect<T>::size;
-            if constexpr (num_members == 0 && is_partial_read<T>) {
-               static_assert(false_v<T>, "No members to read for partial read");
-            }
 
             static constexpr auto Opts = opening_handled_off<ws_handled_off<Options>()>();
             if constexpr (!has_opening_handled(Options)) {
@@ -1787,6 +1797,9 @@ namespace glz
                   GLZ_SUB_LEVEL;
                   ++it;
                   GLZ_VALID_END();
+                  if constexpr (Opts.partial_read) {
+                     ctx.error = error_code::partial_read_complete;
+                  }
                   return;
                }
                ctx.error = error_code::unknown_key;
@@ -1795,7 +1808,7 @@ namespace glz
             else {
                decltype(auto) fields = [&]() -> decltype(auto) {
                   if constexpr ((glaze_object_t<T> || reflectable<T>)&&(Opts.error_on_missing_keys ||
-                                                                        is_partial_read<T> || Opts.partial_read)) {
+                                                                        Opts.partial_read)) {
                      return bit_array<num_members>{};
                   }
                   else {
@@ -1807,7 +1820,7 @@ namespace glz
 
                bool first = true;
                while (true) {
-                  if constexpr ((glaze_object_t<T> || reflectable<T>)&&(is_partial_read<T> || Opts.partial_read)) {
+                  if constexpr ((glaze_object_t<T> || reflectable<T>)&&Opts.partial_read) {
                      static constexpr bit_array<num_members> all_fields = [] {
                         bit_array<num_members> arr{};
                         for (size_t i = 0; i < num_members; ++i) {
@@ -1817,17 +1830,15 @@ namespace glz
                      }();
 
                      if ((all_fields & fields) == all_fields) {
-                        if constexpr (Opts.partial_read_nested) {
-                           skip_until_closed<Opts, '{', '}'>(ctx, it, end);
-                        }
+                        ctx.error = error_code::partial_read_complete;
                         return;
                      }
                   }
 
                   if (*it == '}') {
                      GLZ_SUB_LEVEL;
-                     if constexpr ((glaze_object_t<T> || reflectable<T>)&&((is_partial_read<T> || Opts.partial_read) &&
-                                                                           Opts.error_on_missing_keys)) {
+                     if constexpr ((glaze_object_t<T> ||
+                                    reflectable<T>)&&(Opts.partial_read && Opts.error_on_missing_keys)) {
                         ctx.error = error_code::missing_key;
                         return;
                      }
@@ -1851,7 +1862,7 @@ namespace glz
                      GLZ_MATCH_COMMA;
                      GLZ_INVALID_END();
 
-                     if constexpr ((not Opts.minified) && (num_members > 1 || !Opts.error_on_unknown_keys)) {
+                     if constexpr ((not Opts.minified) && (num_members > 1 || not Opts.error_on_unknown_keys)) {
                         if (ws_size && ws_size < size_t(end - it)) {
                            skip_matching_ws(ws_start, it, ws_size);
                         }
@@ -1927,7 +1938,7 @@ namespace glz
                         }
                      }
 
-                     if constexpr (Opts.error_on_missing_keys || is_partial_read<T> || Opts.partial_read) {
+                     if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
                         size_t index = num_members;
                         parse_and_invoke<Opts, T, hash_info<T>>(value, ctx, it, end, index);
                         if (bool(ctx.error)) [[unlikely]]
@@ -2062,24 +2073,21 @@ namespace glz
       struct variant_types<std::variant<Ts...>>
       {
          // TODO: this way of filtering types is compile time intensive.
-         using bool_types = decltype(tuplet::tuple_cat(
-            std::conditional_t<bool_t<remove_meta_wrapper_t<Ts>>, tuplet::tuple<Ts>, tuplet::tuple<>>{}...));
-         using number_types = decltype(tuplet::tuple_cat(
-            std::conditional_t<num_t<remove_meta_wrapper_t<Ts>>, tuplet::tuple<Ts>, tuplet::tuple<>>{}...));
+         using bool_types =
+            decltype(tuplet::tuple_cat(std::conditional_t<bool_t<remove_meta_wrapper_t<Ts>>, tuple<Ts>, tuple<>>{}...));
+         using number_types =
+            decltype(tuplet::tuple_cat(std::conditional_t<num_t<remove_meta_wrapper_t<Ts>>, tuple<Ts>, tuple<>>{}...));
          using string_types = decltype(tuplet::tuple_cat( // glaze_enum_t remove_meta_wrapper_t supports constexpr
                                                           // types while the other supports non const
             std::conditional_t < str_t<remove_meta_wrapper_t<Ts>> || glaze_enum_t<remove_meta_wrapper_t<Ts>> ||
                glaze_enum_t<Ts>,
-            tuplet::tuple<Ts>, tuplet::tuple < >> {}...));
-         using object_types =
-            decltype(tuplet::tuple_cat(std::conditional_t<json_object<Ts>, tuplet::tuple<Ts>, tuplet::tuple<>>{}...));
-         using array_types =
-            decltype(tuplet::tuple_cat(std::conditional_t < array_t<remove_meta_wrapper_t<Ts>> || glaze_array_t<Ts>,
-                                       tuplet::tuple<Ts>, tuplet::tuple < >> {}...));
-         using nullable_types =
-            decltype(tuplet::tuple_cat(std::conditional_t<null_t<Ts>, tuplet::tuple<Ts>, tuplet::tuple<>>{}...));
-         using nullable_objects = decltype(tuplet::tuple_cat(
-            std::conditional_t<is_memory_object<Ts>, tuplet::tuple<Ts>, tuplet::tuple<>>{}...));
+            tuple<Ts>, tuple < >> {}...));
+         using object_types = decltype(tuplet::tuple_cat(std::conditional_t<json_object<Ts>, tuple<Ts>, tuple<>>{}...));
+         using array_types = decltype(tuplet::tuple_cat(
+            std::conditional_t < array_t<remove_meta_wrapper_t<Ts>> || glaze_array_t<Ts>, tuple<Ts>, tuple < >> {}...));
+         using nullable_types = decltype(tuplet::tuple_cat(std::conditional_t<null_t<Ts>, tuple<Ts>, tuple<>>{}...));
+         using nullable_objects =
+            decltype(tuplet::tuple_cat(std::conditional_t<is_memory_object<Ts>, tuple<Ts>, tuple<>>{}...));
       };
 
       // post process output of variant_types
@@ -2087,12 +2095,12 @@ namespace glz
       struct tuple_types;
 
       template <class... Ts>
-      struct tuple_types<tuplet::tuple<Ts...>>
+      struct tuple_types<tuple<Ts...>>
       {
-         using glaze_const_types = decltype(tuplet::tuple_cat(
-            std::conditional_t<glaze_const_value_t<Ts>, tuplet::tuple<Ts>, tuplet::tuple<>>{}...));
-         using glaze_non_const_types = decltype(tuplet::tuple_cat(
-            std::conditional_t<!glaze_const_value_t<Ts>, tuplet::tuple<Ts>, tuplet::tuple<>>{}...));
+         using glaze_const_types =
+            decltype(tuplet::tuple_cat(std::conditional_t<glaze_const_value_t<Ts>, tuple<Ts>, tuple<>>{}...));
+         using glaze_non_const_types =
+            decltype(tuplet::tuple_cat(std::conditional_t<!glaze_const_value_t<Ts>, tuple<Ts>, tuple<>>{}...));
       };
 
       template <class>

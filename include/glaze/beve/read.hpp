@@ -968,7 +968,7 @@ namespace glz
          }
 
          // for types like std::vector<std::pair...> that can't look up with operator[]
-         // Intead of hashing or linear searching, we just clear the input and overwrite the entire contents
+         // Instead of hashing or linear searching, we just clear the input and overwrite the entire contents
          template <auto Opts>
             requires(pair_t<range_value_t<T>> && Opts.concatenate == true)
          static void op(auto&& value, is_context auto&& ctx, auto&& it, auto&& end)
@@ -1236,7 +1236,7 @@ namespace glz
          static void op(auto&& value, is_context auto&& ctx, auto&& it, auto&& end)
          {
             if constexpr (reflectable<T>) {
-               auto t = to_tuple(value);
+               auto t = to_tie(value);
                read<BEVE>::op<Opts>(t, ctx, it, end);
             }
             else {
@@ -1290,7 +1290,7 @@ namespace glz
             }();
 
             decltype(auto) fields = [&]() -> decltype(auto) {
-               if constexpr (is_partial_read<T> || Opts.partial_read) {
+               if constexpr (Opts.partial_read) {
                   return bit_array<N>{};
                }
                else {
@@ -1304,7 +1304,7 @@ namespace glz
             }
 
             for (size_t i = 0; i < n_keys; ++i) {
-               if constexpr (is_partial_read<T> || Opts.partial_read) {
+               if constexpr (Opts.partial_read) {
                   if ((all_fields & fields) == all_fields) {
                      return;
                   }
@@ -1325,7 +1325,7 @@ namespace glz
                   const auto index = decode_hash_with_size<BEVE, T, HashInfo, HashInfo.type>::op(it, end, n);
 
                   if (index < N) [[likely]] {
-                     if constexpr (is_partial_read<T> || Opts.partial_read) {
+                     if constexpr (Opts.partial_read) {
                         fields[index] = true;
                      }
 
@@ -1338,7 +1338,7 @@ namespace glz
                            static constexpr auto Length = TargetKey.size();
                            if ((Length == n) && compare<Length>(TargetKey.data(), key.data())) [[likely]] {
                               if constexpr (detail::reflectable<T>) {
-                                 read<BEVE>::op<Opts>(get_member(value, get<I>(to_tuple(value))), ctx, it, end);
+                                 read<BEVE>::op<Opts>(get_member(value, get<I>(to_tie(value))), ctx, it, end);
                               }
                               else {
                                  read<BEVE>::op<Opts>(get_member(value, get<I>(reflect<T>::values)), ctx, it, end);
