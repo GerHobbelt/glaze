@@ -81,7 +81,11 @@ BEVE size: 611 bytes
 
 *BEVE packs more efficiently than JSON, so transporting the same data is even faster.
 
-## Example
+## Examples
+
+> [!TIP]
+>
+> See the [example_json](https://github.com/stephenberry/glaze/blob/main/tests/example_json/example_json.cpp) unit test for basic examples of how to use Glaze. See [json_test](https://github.com/stephenberry/glaze/blob/main/tests/json_test/json_test.cpp) for an extensive test of features.
 
 Your struct will automatically get reflected! No metadata is required by the user.
 
@@ -172,7 +176,7 @@ auto ec = glz::write_file_json(obj, "./obj.json", std::string{});
 - Tested for both 64bit and 32bit
 - Only supports little-endian systems
 
-[Actions](https://github.com/stephenberry/glaze/actions) build and test with [Clang](https://clang.llvm.org) (15+), [MSVC](https://visualstudio.microsoft.com/vs/features/cplusplus/) (2022), and [GCC](https://gcc.gnu.org) (12+) on apple, windows, and linux.
+[Actions](https://github.com/stephenberry/glaze/actions) build and test with [Clang](https://clang.llvm.org) (17+), [MSVC](https://visualstudio.microsoft.com/vs/features/cplusplus/) (2022), and [GCC](https://gcc.gnu.org) (12+) on apple, windows, and linux.
 
 ![clang build](https://github.com/stephenberry/glaze/actions/workflows/clang.yml/badge.svg) ![gcc build](https://github.com/stephenberry/glaze/actions/workflows/gcc.yml/badge.svg) ![msvc build](https://github.com/stephenberry/glaze/actions/workflows/msvc.yml/badge.svg) 
 
@@ -235,7 +239,7 @@ import libs = libglaze%lib{glaze}
 
 # Explicit Metadata
 
-If you want to specialize your reflection then you can optionally write the code below:
+If you want to specialize your reflection then you can **optionally** write the code below:
 
 > This metadata is also necessary for non-aggregate initializable structs.
 
@@ -320,13 +324,31 @@ static_assert(glz::reflect<my_struct>::keys[0] == "i"); // Access keys
 
 > [!WARNING]
 >
-> The `glz::reflect` fields described above have been formalized and are unlikely to change. Other fields within the `glz::reflect` struct may evolve as we continue to formalize the spec. Therefore, breaking changes may occur for undocumented fields in the future.
+> The `glz::reflect` fields described above have been formalized and are unlikely to change. Other fields may evolve as we continue to formalize the spec.
+
+## glz::for_each_field
+
+```c++
+struct test_type {
+   int32_t int1{};
+   int64_t int2{};
+};
+
+test_type var{42, 43};
+
+glz::for_each_field(var, [](auto& field) {
+    field += 1;
+});
+
+expect(var.int1 == 43);
+expect(var.int2 == 44);
+```
 
 # Custom Read/Write
 
 Custom reading and writing can be achieved through the powerful `to`/`from` specialization approach, which is described here: [custom-serialization.md](https://github.com/stephenberry/glaze/blob/main/docs/custom-serialization.md). However, this only works for user defined types.
 
-For common use cases or cases where a specific member variable should have special reading and writing, you can use `glz::custom` to register read/write member functions, std::functions, or lambda functions.
+For common use cases or cases where a specific member variable should have special reading and writing, you can use [glz::custom](https://github.com/stephenberry/glaze/blob/main/docs/wrappers.md#custom) to register read/write member functions, std::functions, or lambda functions.
 
 <details><summary>See example:</summary>
 
@@ -381,6 +403,38 @@ suite custom_encoding_test = [] {
       std::string out{};
       expect(not glz::write_json(obj, out));
       expect(out == R"({"x":3,"y":"helloworld","z":[5,2,3]})");
+   };
+};
+```
+
+</details>
+
+<details><summary>Another example with constexpr lambdas:</summary>
+
+```c++
+struct custom_buffer_input
+{
+   std::string str{};
+};
+
+template <>
+struct glz::meta<custom_buffer_input>
+{
+   static constexpr auto read_x = [](custom_buffer_input& s, const std::string& input) { s.str = input; };
+   static constexpr auto write_x = [](auto& s) -> auto& { return s.str; };
+   static constexpr auto value = glz::object("str", glz::custom<read_x, write_x>);
+};
+
+suite custom_lambdas_test = [] {
+   "custom_buffer_input"_test = [] {
+      std::string s = R"({"str":"Hello!"})";
+      custom_buffer_input obj{};
+      expect(!glz::read_json(obj, s));
+      expect(obj.str == "Hello!");
+      s.clear();
+      expect(!glz::write_json(obj, s));
+      expect(s == R"({"str":"Hello!"})");
+      expect(obj.str == "Hello!");
    };
 };
 ```

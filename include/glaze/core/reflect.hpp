@@ -183,7 +183,7 @@ namespace glz
       using elem = decltype(get<I>(values));
 
       template <size_t I>
-      using type = detail::member_t<V, decltype(get<I>(values))>;
+      using type = member_t<V, decltype(get<I>(values))>;
    };
 
    namespace detail
@@ -214,7 +214,7 @@ namespace glz
       using elem = decltype(get<I>(values));
 
       template <size_t I>
-      using type = detail::member_t<V, decltype(get<I>(values))>;
+      using type = member_t<V, decltype(get<I>(values))>;
    };
 
    template <class T>
@@ -236,7 +236,7 @@ namespace glz
       using elem = decltype(get<I>(values));
 
       template <size_t I>
-      using type = detail::member_t<V, decltype(get<I>(values))>;
+      using type = member_t<V, decltype(get<I>(values))>;
    };
 
    template <class T>
@@ -244,7 +244,7 @@ namespace glz
    struct reflect<T>
    {
       using V = std::remove_cvref_t<T>;
-      using tuple = decay_keep_volatile_t<decltype(detail::to_tuple(std::declval<T>()))>;
+      using tuple = decay_keep_volatile_t<decltype(to_tuple(std::declval<T>()))>;
 
       // static constexpr auto values = typename detail::tuple_ptr<tuple>::type{};
 
@@ -255,7 +255,7 @@ namespace glz
       using elem = decltype(get<I>(std::declval<tuple>()));
 
       template <size_t I>
-      using type = detail::member_t<V, decltype(get<I>(std::declval<tuple>()))>;
+      using type = member_t<V, decltype(get<I>(std::declval<tuple>()))>;
    };
 
    template <class T>
@@ -2197,6 +2197,33 @@ namespace glz
       }
       else {
          return "";
+      }
+   }
+}
+
+namespace glz
+{
+   // The Callable comes second as ranges::for_each puts the callable at the end
+
+   template <class Callable, detail::reflectable T>
+   void for_each_field(T&& value, Callable&& callable)
+   {
+      constexpr auto N = reflect<T>::size;
+      if constexpr (N > 0) {
+         [&]<size_t... I>(std::index_sequence<I...>) constexpr {
+            (callable(get_member(value, get<I>(to_tuple(value)))), ...);
+         }(std::make_index_sequence<N>{});
+      }
+   }
+
+   template <class Callable, detail::glaze_object_t T>
+   void for_each_field(T&& value, Callable&& callable)
+   {
+      constexpr auto N = reflect<T>::size;
+      if constexpr (N > 0) {
+         [&]<size_t... I>(std::index_sequence<I...>) constexpr {
+            (callable(get_member(value, get<I>(reflect<T>::values))), ...);
+         }(std::make_index_sequence<N>{});
       }
    }
 }

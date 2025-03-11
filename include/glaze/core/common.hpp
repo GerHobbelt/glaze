@@ -229,8 +229,9 @@ namespace glz
          requires { std::tuple_size<T>::value; } && std::same_as<T, std::array<char, std::tuple_size_v<T>>>;
 
       template <class T>
-      concept str_t = (!std::same_as<std::nullptr_t, T> && std::convertible_to<std::decay_t<T>, std::string_view>) ||
-                      array_char_t<T>;
+      concept str_t =
+         (!std::same_as<std::nullptr_t, T> && std::constructible_from<std::string_view, std::decay_t<T>>) ||
+         array_char_t<T>;
 
       // this concept requires that T is a writeable string. It can be resized, appended to, or assigned to
       template <class T>
@@ -346,11 +347,20 @@ namespace glz
          };
       };
 
+      // For optional like types that cannot overload `operator bool()`
+      template <class T>
+      concept nullable_value_t = !meta_value_t<T> && requires(T t) {
+         t.value();
+         {
+            t.has_value()
+         } -> std::convertible_to<bool>;
+      };
+
       template <class T>
       concept nullable_wrapper = glaze_wrapper<T> && nullable_t<typename T::value_type>;
 
       template <class T>
-      concept null_t = nullable_t<T> || always_null_t<T> || nullable_wrapper<T>;
+      concept null_t = nullable_t<T> || nullable_value_t<T> || always_null_t<T> || nullable_wrapper<T>;
 
       template <class T>
       concept func_t = requires(T t) {
@@ -409,41 +419,66 @@ namespace glz
 
          return make_variant_id_map_impl<T>(indices, ids_v<T>);
       }
+   }
 
-      // TODO: Should noexcept be removed and will this have performance implications?
-      // The invocations could potentially throw, though unlikely
-      template <class Value, class Element>
-      inline decltype(auto) get_member(Value&& value, Element&& element) noexcept
-      {
-         using V = std::decay_t<decltype(element)>;
-         if constexpr (std::is_member_object_pointer_v<V>) {
-            return value.*element;
-         }
-         else if constexpr (std::is_member_function_pointer_v<V>) {
-            return element;
-         }
-         else if constexpr (std::invocable<Element, Value> && not matrix_t<Element>) {
-            // Eigen places a static_assert inside of the operator()(), so we must target
-            // matrix types and reject them from the invocable check
-            // Eigen ought to put the check in the `enable_if` for operator()()
-            return std::invoke(std::forward<Element>(element), std::forward<Value>(value));
-         }
-         else if constexpr (std::is_pointer_v<V>) {
-            if constexpr (std::invocable<decltype(*element), Value>) {
-               return std::invoke(*element, std::forward<Value>(value));
-            }
-            else {
-               return *element;
-            }
+   /**
+    * @brief Extracts the underlying member from a struct.
+    *
+    * Core Glaze function to extract the underlying member. Typically, the `value` parameter
+    * is the struct containing the member field. The `element` parameter denotes a member object
+    * pointer or an invocable function, which allows member extraction from the struct.
+    *
+    * @tparam Value   The type of the value, usually a struct containing the member.
+    * @tparam Element The type of the element, either a member pointer, an invocable function, or reference/pointer.
+    * @param value    The struct from which to extract the member.
+    * @param element  The member pointer or invocable function used to extract the member.
+    * @return         The extracted member.
+    */
+   template <class Value, class Element>
+   GLZ_ALWAYS_INLINE decltype(auto) get_member(Value&& value, Element&& element)
+   {
+      using V = std::decay_t<decltype(element)>;
+      if constexpr (std::is_member_object_pointer_v<V>) {
+         return value.*element;
+      }
+      else if constexpr (std::is_member_function_pointer_v<V>) {
+         return element;
+      }
+      else if constexpr (std::invocable<Element, Value> && not matrix_t<Element>) {
+         // Eigen places a static_assert inside of the operator()(), so we must target
+         // matrix types and reject them from the invocable check
+         // Eigen ought to put the check in the `enable_if` for operator()()
+         return std::invoke(std::forward<Element>(element), std::forward<Value>(value));
+      }
+      else if constexpr (std::is_pointer_v<V>) {
+         if constexpr (std::invocable<decltype(*element), Value>) {
+            return std::invoke(*element, std::forward<Value>(value));
          }
          else {
-            return element;
+            return *element;
          }
       }
+      else {
+         return element;
+      }
+   }
 
-      template <class T, class Element>
-      using member_t = decltype(get_member(std::declval<std::add_lvalue_reference_t<T>>(), std::declval<Element>()));
+   /**
+    * @brief Alias for the expected return type of `get_member`.
+    *
+    * This template alias deduces the return type of the `get_member` function when called with
+    * the specified `Value` and `Element` types.
+    *
+    * @tparam Value   The type of the value parameter, typically a struct containing the member.
+    * @tparam Element The type of the element, either a member pointer, an invocable function, or reference/pointer.
+    *
+    * @see get_member
+    */
+   template <class Value, class Element>
+   using member_t = decltype(get_member(std::declval<std::add_lvalue_reference_t<Value>>(), std::declval<Element>()));
 
+   namespace detail
+   {
       // member_ptr and lambda wrapper helper
       template <template <class> class Wrapper, class Wrapped>
       struct wrap
@@ -602,7 +637,8 @@ struct glz::meta<glz::error_code>
                                     "unknown_distribution",
                                     "invalid_distribution_elements",
                                     "hostname_failure",
-                                    "includer_error"};
+                                    "includer_error",
+                                    "feature_not_supported"};
    static constexpr std::array value{none, //
                                      version_mismatch, //
                                      invalid_header, //
@@ -669,5 +705,6 @@ struct glz::meta<glz::error_code>
                                      unknown_distribution, //
                                      invalid_distribution_elements, //
                                      hostname_failure, //
-                                     includer_error};
+                                     includer_error, //
+                                     feature_not_supported};
 };

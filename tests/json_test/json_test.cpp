@@ -1,8 +1,6 @@
 // Glaze Library
 // For the license information refer to glaze.hpp
 
-#define UT_RUN_TIME_ONLY
-
 #include <any>
 #include <atomic>
 #include <bitset>
@@ -2267,9 +2265,20 @@ suite read_tests = [] {
          for (size_t i = 0; i < 1000; ++i) {
             const auto f = dist(gen);
             expect(not glz::write_json(f, buffer));
+
+            // Check if 'f' is exactly an integer
+            const bool is_integer = (std::floor(f) == f);
+
             int64_t integer{};
-            auto ec = glz::read_json(integer, buffer);
-            expect(ec);
+            if (is_integer) {
+               auto ec = glz::read_json(integer, buffer);
+               expect(!ec); // Expect no error when reading as integer
+               expect(integer == int64_t(f));
+            }
+            else {
+               auto ec = glz::read_json(integer, buffer);
+               expect(ec); // Expect an error when reading a non-integer as integer
+            }
          }
       }
    };
@@ -5855,7 +5864,7 @@ struct non_cx_values
    std::string value{};
 };
 
-static_assert(std::is_same_v<glz::detail::member_t<non_cx_values, decltype(&non_cx_values::info)>, std::string_view&>);
+static_assert(std::is_same_v<glz::member_t<non_cx_values, decltype(&non_cx_values::info)>, std::string_view&>);
 
 struct cx_values
 {
@@ -5864,7 +5873,7 @@ struct cx_values
    std::string value{};
 };
 
-static_assert(std::is_same_v<glz::detail::member_t<cx_values, decltype(&cx_values::info)>, const std::string_view&>);
+static_assert(std::is_same_v<glz::member_t<cx_values, decltype(&cx_values::info)>, const std::string_view&>);
 
 template <>
 struct glz::meta<cx_values>
@@ -9887,6 +9896,107 @@ suite const_pointer_tests = [] {
       }
       expect(p.name == "Foo Bar");
       expect(p.p_add->street == "Baz Yaz");
+   };
+};
+
+template <class T>
+struct custom_nullable_t
+{
+   std::optional<T> val{};
+
+   bool has_value() const { return val.has_value(); }
+
+   T& value() { return *val; }
+
+   const T& value() const { return *val; }
+
+   template <class... Args>
+   void emplace(Args&&... args)
+   {
+      val.emplace(std::forward<Args>(args)...);
+   }
+};
+
+struct custom_nullable_container_t
+{
+   custom_nullable_t<double> x{};
+};
+
+suite custom_nullable_with_specialization = [] {
+   "custom_nullable_with_specialization"_test = [] {
+      custom_nullable_t<double> obj{};
+      obj.val = 3.14;
+      std::string buffer{};
+      expect(not glz::write_json(obj, buffer));
+      obj.val = {};
+      expect(not glz::read_json(obj, buffer));
+      expect(obj.val == 3.14);
+      obj.val = {};
+      expect(not glz::write_json(obj, buffer));
+      expect(buffer == "null");
+   };
+
+   "custom_nullable_with_specialization_container"_test = [] {
+      custom_nullable_container_t obj{};
+      obj.x.val = 3.14;
+      std::string buffer{};
+      expect(not glz::write_json(obj, buffer));
+      obj.x.val = {};
+      expect(not glz::read_json(obj, buffer));
+      expect(obj.x.val == 3.14);
+      obj.x.val = {};
+      expect(not glz::write_json(obj, buffer));
+      expect(buffer == "{}");
+   };
+};
+
+struct A1
+{
+   int p{};
+};
+
+struct B1
+{
+   float p{};
+};
+
+using X1 = std::variant<A1>;
+using Y1 = std::variant<A1, B1>;
+
+template <>
+struct glz::meta<A1>
+{
+   static constexpr auto value = object("p", &A1::p);
+};
+
+template <>
+struct glz::meta<B1>
+{
+   static constexpr auto value = object("p", &B1::p);
+};
+
+template <>
+struct glz::meta<X1>
+{
+   static constexpr std::string_view tag = "tag";
+};
+
+template <>
+struct glz::meta<Y1>
+{
+   static constexpr std::string_view tag = "tag";
+};
+
+suite variant_tag_tests = [] {
+   "variant tag"_test = [] {
+      auto xString = glz::write_json(X1(A1()));
+      expect(xString.has_value());
+
+      auto x = glz::read_json<X1>(*xString);
+      expect(bool(x));
+      if (not x.has_value()) {
+         std::cerr << glz::format_error(x.error(), *xString);
+      }
    };
 };
 
