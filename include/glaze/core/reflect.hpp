@@ -214,15 +214,14 @@ namespace glz
    // The type of the field after get_member is applied
    template <class T, size_t I>
    using refl_t = reflect<T>::template type<I>;
-   
+
    // The decayed type after get_member is called
    template <class T, size_t I>
    using field_t = std::remove_cvref_t<refl_t<T, I>>;
-   
+
    template <opts Opts, class T>
    inline constexpr bool maybe_skipped = [] {
-      if constexpr (reflect<T>::size > 0)
-      {
+      if constexpr (reflect<T>::size > 0) {
          constexpr auto N = reflect<T>::size;
          if constexpr (Opts.skip_null_members) {
             // if any type could be null then we might skip
@@ -820,7 +819,7 @@ namespace glz::detail
          const auto& s = strings[i];
          // for each character in the string
          for (size_t c = 0; c < min_length; ++c) {
-            const auto k = uint16_t(s[c]) | (uint16_t(s.size()) << 8);
+            const auto k = uint16_t(uint16_t(s[c]) | (uint16_t(s.size()) << 8));
             cols[c].emplace_back(k);
          }
       }

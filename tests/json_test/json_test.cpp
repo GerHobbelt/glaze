@@ -5768,6 +5768,20 @@ struct glz::meta<numbers_as_strings>
    static constexpr auto value = object("x", glz::number<&T::x>, "y", glz::number<&T::y>);
 };
 
+struct numbers_as_strings2
+{
+   std::string i{};
+   std::string d{};
+   std::string hello{};
+};
+
+template <>
+struct glz::meta<numbers_as_strings2>
+{
+   using T = numbers_as_strings2;
+   static constexpr auto value = object("i", number<&T::i>, "d", number<&T::d>, &T::hello);
+};
+
 suite numbers_as_strings_suite = [] {
    "numbers_as_strings"_test = [] {
       numbers_as_strings obj{};
@@ -5780,6 +5794,16 @@ suite numbers_as_strings_suite = [] {
       std::string output;
       expect(not glz::write_json(obj, output));
       expect(input == output);
+   };
+
+   "numbers_as_strings2"_test = [] {
+      std::string const buffer = R"({"i":287,"d":3.14,"hello":"Hello World"})";
+
+      numbers_as_strings2 value{};
+      const auto error_ctx = glz::read_json(value, buffer);
+      expect(not error_ctx) << glz::format_error(error_ctx, buffer);
+      expect(value.i == "287");
+      expect(value.d == "3.14");
    };
 };
 
@@ -10114,6 +10138,69 @@ suite meta_keys_for_struct = [] {
       expect(obj.crow == "caw");
       expect(obj.sparrow == "chirp");
       expect(obj.hawk == "screech");
+   };
+};
+
+struct append_obj
+{
+   std::vector<std::string> names{};
+   std::vector<std::array<int, 2>> arrays{};
+};
+
+template <>
+struct glz::meta<append_obj>
+{
+   using T = append_obj;
+   static constexpr auto value = object("names", append_arrays<&T::names>, "arrays", append_arrays<&T::arrays>);
+};
+
+suite append_arrays_tests = [] {
+   "append_arrays vector"_test = [] {
+      std::vector<int> v{};
+      constexpr glz::opts append_opts{.append_arrays = true};
+      expect(not glz::read<append_opts>(v, "[1,2,3]"));
+      expect(v == std::vector<int>{1, 2, 3});
+      expect(not glz::read<append_opts>(v, "[4,5,6]"));
+      expect(v == std::vector<int>{1, 2, 3, 4, 5, 6});
+   };
+
+   "append_arrays deque"_test = [] {
+      std::deque<int> v{};
+      constexpr glz::opts append_opts{.append_arrays = true};
+      expect(not glz::read<append_opts>(v, "[1,2,3]"));
+      expect(v == std::deque<int>{1, 2, 3});
+      expect(not glz::read<append_opts>(v, "[4,5,6]"));
+      expect(v == std::deque<int>{1, 2, 3, 4, 5, 6});
+   };
+
+   "append_arrays append_obj"_test = [] {
+      append_obj obj{};
+      expect(not glz::read_json(obj, R"({"names":["Bob"],"arrays":[[0,0]]})"));
+      expect(obj.names == std::vector<std::string>{"Bob"});
+      expect(obj.arrays == std::vector<std::array<int, 2>>{{0, 0}});
+
+      expect(not glz::read_json(obj, R"({"names":["Liz"],"arrays":[[1,1]]})"));
+      expect(obj.names == std::vector<std::string>{"Bob", "Liz"});
+      expect(obj.arrays == std::vector<std::array<int, 2>>{{0, 0}, {1, 1}});
+   };
+};
+
+suite asan_test = []
+{
+   "asan_non_null_terminated"_test = [] {
+      const std::string_view data = R"({"x":"")";
+      const auto heap_buf = std::make_unique_for_overwrite<char[]>(data.size());
+      std::ranges::copy(data, heap_buf.get());
+      const std::string_view buf{heap_buf.get(), data.size()};
+
+      constexpr glz::opts OPTS{
+        .null_terminated = false,
+        .error_on_unknown_keys = false,
+        .minified = true,
+      };
+
+      struct {} t;
+      expect(glz::read<OPTS>(t, buf));
    };
 };
 

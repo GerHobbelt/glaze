@@ -62,6 +62,10 @@ namespace glz
       }
    }
 
+   // When reading into an array that is appendable, the new data will be appended rather than overwrite
+   template <auto MemPtr>
+   constexpr auto append_arrays = detail::opts_wrapper<MemPtr, &opts::append_arrays>();
+
    // Read and write booleans as numbers
    template <auto MemPtr>
    constexpr auto bools_as_numbers = detail::opts_wrapper<MemPtr, &opts::bools_as_numbers>();
@@ -70,7 +74,7 @@ namespace glz
    template <auto MemPtr>
    constexpr auto quoted_num = detail::opts_wrapper<MemPtr, &opts::quoted_num>();
 
-   // Read numbers as strings and write these string as numbers
+   // Treat types like std::string as numbers: read and write them quoted
    template <auto MemPtr>
    constexpr auto number = detail::opts_wrapper<MemPtr, &opts::number>();
 

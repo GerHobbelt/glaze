@@ -63,6 +63,7 @@ namespace glz
       char indentation_char = ' '; // Prettified JSON indentation char
       uint8_t indentation_width = 3; // Prettified JSON indentation size
       bool_t new_lines_in_arrays = true; // Whether prettified arrays should have new lines for each element
+      bool_t append_arrays = false; // When reading into an array the data will be appended if the type supports it
       bool_t shrink_to_fit = false; // Shrinks dynamic containers to new size to save memory
       bool_t write_type_info = true; // Write type info for meta objects in variants
       bool_t error_on_missing_keys = false; // Require all non nullable keys to be present in the object. Use
@@ -81,7 +82,7 @@ namespace glz
       bool_t bools_as_numbers = false; // Read and write booleans with 1's and 0's
 
       bool_t quoted_num = false; // treat numbers as quoted or array-like types as having quoted numbers
-      bool_t number = false; // read numbers as strings and write these string as numbers
+      bool_t number = false; // treats all types like std::string as numbers: read/write these quoted numbers
       bool_t raw = false; // write out string like values without quotes
       bool_t raw_string =
          false; // do not decode/encode escaped characters for strings (improves read/write performance)
