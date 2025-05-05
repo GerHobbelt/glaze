@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "glaze/concepts/container_concepts.hpp"
+#include "glaze/core/array_apply.hpp"
 #include "glaze/core/context.hpp"
 #include "glaze/core/feature_test.hpp"
 #include "glaze/core/meta.hpp"
@@ -158,7 +159,7 @@ namespace glz
       basic_raw_json() = default;
 
       template <class T>
-         requires(!std::same_as<std::decay_t<T>, basic_raw_json>)
+         requires(!std::same_as<std::decay_t<T>, basic_raw_json> && std::constructible_from<string_type, T>)
       basic_raw_json(T&& s) : str(std::forward<T>(s))
       {}
 
@@ -376,6 +377,9 @@ namespace glz
 
    template <class T>
    concept glaze_enum_t = glaze_t<T> && is_specialization_v<meta_wrapper_t<T>, detail::Enum>;
+
+   template <class T>
+   concept is_named_enum = ((glaze_enum_t<T> || (meta_keys<T> && std::is_enum_v<T>)) && !custom_read<T>);
 
    template <class T>
    concept glaze_flags_t = glaze_t<T> && is_specialization_v<meta_wrapper_t<T>, detail::Flags>;
