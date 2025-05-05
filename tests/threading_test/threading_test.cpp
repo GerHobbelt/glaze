@@ -1557,7 +1557,7 @@ suite additional_async_vector_tests = [] {
                   [[maybe_unused]] auto temp_cit = proxy.cbegin() + i;
                }
             }
-            catch (const std::exception& e) {
+            catch (const std::exception&) {
                errors++;
             }
          }
@@ -1580,7 +1580,7 @@ suite additional_async_vector_tests = [] {
                   errors++;
                }
             }
-            catch (const std::exception& e) {
+            catch (const std::exception&) {
                errors++;
             }
          }
@@ -1596,7 +1596,7 @@ suite additional_async_vector_tests = [] {
                *it = counter;
                counter++;
             }
-            catch (const std::exception& e) {
+            catch (const std::exception&) {
                errors++;
             }
          }
@@ -1656,7 +1656,7 @@ suite additional_async_vector_tests = [] {
                      proxy.erase(erase_iter);
                   }
                }
-               catch (const std::exception& e) {
+               catch (const std::exception&) {
                   errors++;
                }
             }
@@ -1712,7 +1712,7 @@ suite additional_async_vector_tests = [] {
                   // Small delay to increase chance of contention
                   std::this_thread::sleep_for(std::chrono::microseconds(std::rand() % 100));
                }
-               catch (const std::exception& e) {
+               catch (const std::exception&) {
                   errors++;
                }
             }
@@ -1773,7 +1773,7 @@ suite additional_async_vector_tests = [] {
                      completed_operations++;
                   }
                }
-               catch (const std::exception& e) {
+               catch (const std::exception&) {
                   // Error, but not necessarily a deadlock
                }
             }
@@ -1818,7 +1818,7 @@ suite additional_async_vector_tests = [] {
                   it->access(); // Access the object to increment counter
                }
             }
-            catch (const std::exception& e) {
+            catch (const std::exception&) {
                errors++;
             }
          }
@@ -1850,7 +1850,7 @@ suite additional_async_vector_tests = [] {
                counter++;
                std::this_thread::sleep_for(std::chrono::microseconds(100));
             }
-            catch (const std::exception& e) {
+            catch (const std::exception&) {
                errors++;
             }
          }
@@ -1899,7 +1899,7 @@ suite additional_async_vector_tests = [] {
                resize_count++;
                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            catch (const std::exception& e) {
+            catch (const std::exception&) {
                errors++;
             }
          }
@@ -1917,7 +1917,7 @@ suite additional_async_vector_tests = [] {
                      sum += proxy[i];
                   }
                }
-               catch (const std::exception& e) {
+               catch (const std::exception&) {
                   errors++;
                }
             }
@@ -1940,7 +1940,7 @@ suite additional_async_vector_tests = [] {
                   }
                   counter++;
                }
-               catch (const std::exception& e) {
+               catch (const std::exception&) {
                   errors++;
                }
             }
@@ -2258,6 +2258,51 @@ suite async_vector_json_tests = [] {
       expect((*reader)[0] == 1);
       expect((*reader)[1] == 2);
       expect((*reader)[2] == 3);
+   };
+};
+
+suite async_vector_beve_tests = [] {
+   "async_vector write_beve / read_beve"_test = [] {
+      glz::async_vector<int> v;
+      v.push_back(1);
+      v.push_back(2);
+      v.push_back(3);
+      v.push_back(4);
+      v.push_back(5);
+
+      std::string buffer{};
+
+      // write_json returns a status code: false means success, true means error
+      expect(not glz::write_beve(v, buffer)) << "Failed to serialize async_vector";
+      glz::async_vector<int> result;
+      expect(not glz::read_beve(result, buffer)) << "Failed to deserialize async_vector";
+
+      auto result_reader = result.read();
+      expect(result_reader->size() == 5);
+      expect((*result_reader)[0] == 1);
+      expect((*result_reader)[1] == 2);
+      expect((*result_reader)[2] == 3);
+      expect((*result_reader)[3] == 4);
+      expect((*result_reader)[4] == 5);
+   };
+
+   "async_vector custom object serialization"_test = [] {
+      glz::async_vector<Point> points;
+      points.push_back({1, 2});
+      points.push_back({3, 4});
+      points.push_back({5, 6});
+
+      std::string buffer{};
+      expect(not glz::write_beve(points, buffer)) << "Failed to serialize custom objects in async_vector";
+
+      glz::async_vector<Point> result;
+      expect(not glz::read_beve(result, buffer)) << "Failed to deserialize custom objects in async_vector";
+
+      auto result_reader = result.read();
+      expect(result_reader->size() == 3);
+      expect((*result_reader)[0] == Point{1, 2});
+      expect((*result_reader)[1] == Point{3, 4});
+      expect((*result_reader)[2] == Point{5, 6});
    };
 };
 
