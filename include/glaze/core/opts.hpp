@@ -20,6 +20,7 @@ namespace glz
    inline constexpr uint32_t TOML = 400;
    inline constexpr uint32_t STENCIL = 500;
    inline constexpr uint32_t CSV = 10000;
+   inline constexpr uint32_t EETF = 20000;
 
    // layout
    inline constexpr uint8_t rowwise = 0;
@@ -434,10 +435,10 @@ namespace glz
    template <uint32_t Format = INVALID>
    struct skip_value;
 
-   template <uint32_t Format, class T>
+   template <class T, uint32_t Format>
    concept write_supported = requires { to<Format, std::remove_cvref_t<T>>{}; };
 
-   template <uint32_t Format, class T>
+   template <class T, uint32_t Format>
    concept read_supported = requires { from<Format, std::remove_cvref_t<T>>{}; };
 
    // These templates save typing by determining the core type used to select the proper to/from specialization
