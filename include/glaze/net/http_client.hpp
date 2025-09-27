@@ -247,11 +247,11 @@ namespace glz
    // Stream request parameters struct
    struct stream_request_params
    {
-      std::string_view url;
+      std::string url;
       http_data_handler on_data;
       http_error_handler on_error;
-      std::string_view method{};
-      std::string_view body{};
+      std::string method{};
+      std::string body{};
       std::unordered_map<std::string, std::string> headers{};
       http_connect_handler on_connect{};
       http_disconnect_handler on_disconnect{};
@@ -283,7 +283,7 @@ namespace glz
       }
 
       // Synchronous POST request - truly synchronous, no promises/futures
-      std::expected<response, std::error_code> post(std::string_view url, std::string_view body,
+      std::expected<response, std::error_code> post(std::string_view url, const std::string& body,
                                                     const std::unordered_map<std::string, std::string>& headers = {})
       {
          auto url_result = parse_url(url);
@@ -291,7 +291,7 @@ namespace glz
             return std::unexpected(url_result.error());
          }
 
-         return perform_sync_request("POST", *url_result, std::string(body), headers);
+         return perform_sync_request("POST", *url_result, body, headers);
       }
 
       // Synchronous JSON POST request
@@ -321,9 +321,9 @@ namespace glz
             return nullptr;
          }
 
-         std::string method = params.method.empty() ? "GET" : std::string(params.method);
+         std::string method = params.method.empty() ? "GET" : params.method;
 
-         return perform_stream_request(method, *url_result, std::string(params.body), params.headers, params.timeout,
+         return perform_stream_request(method, *url_result, params.body, params.headers, params.timeout,
                                        params.strategy, params.on_data, params.on_error, params.on_connect,
                                        params.on_disconnect);
       }
@@ -360,7 +360,7 @@ namespace glz
 
       // Asynchronous POST request
       template <typename CompletionHandler>
-      void post_async(std::string_view url, std::string_view body,
+      void post_async(std::string_view url, const std::string& body,
                       const std::unordered_map<std::string, std::string>& headers, CompletionHandler&& handler)
       {
          auto url_result = parse_url(url);
@@ -370,13 +370,13 @@ namespace glz
             return;
          }
 
-         perform_request_async("POST", *url_result, std::string(body), headers,
-                               std::forward<CompletionHandler>(handler));
+         perform_request_async("POST", *url_result, body, headers, std::forward<CompletionHandler>(handler));
       }
 
       // Overload for post_async without completion handler (returns future)
       std::future<std::expected<response, std::error_code>> post_async(
-         std::string_view url, std::string_view body, const std::unordered_map<std::string, std::string>& headers = {})
+         std::string_view url, const std::string& body,
+         const std::unordered_map<std::string, std::string>& headers = {})
       {
          std::promise<std::expected<response, std::error_code>> promise;
          auto future = promise.get_future();
@@ -613,7 +613,7 @@ namespace glz
                }
 
                // Create a zero-copy string_view of the received headers
-               std::string_view header_data{asio::buffer_cast<const char*>(connection->buffer->data()),
+               std::string_view header_data{static_cast<const char*>(connection->buffer->data().data()),
                                             bytes_transferred};
 
                // Parse status line
@@ -716,7 +716,7 @@ namespace glz
                   return;
                }
 
-               std::string_view line_view{asio::buffer_cast<const char*>(connection->buffer->data()),
+               std::string_view line_view{static_cast<const char*>(connection->buffer->data().data()),
                                           bytes_transferred - 2}; // -2 to exclude CRLF
 
                // Ignore chunk extensions
@@ -758,7 +758,7 @@ namespace glz
 
          // Check if we have enough data in the buffer already.
          if (connection->buffer->size() >= total_to_read) {
-            std::string_view data{asio::buffer_cast<const char*>(connection->buffer->data()), chunk_size};
+            std::string_view data{static_cast<const char*>(connection->buffer->data().data()), chunk_size};
             on_data(data);
             connection->buffer->consume(total_to_read);
 
@@ -784,7 +784,7 @@ namespace glz
                   return;
                }
 
-               std::string_view data{asio::buffer_cast<const char*>(connection->buffer->data()), chunk_size};
+               std::string_view data{static_cast<const char*>(connection->buffer->data().data()), chunk_size};
                on_data(data);
                connection->buffer->consume(chunk_size + 2); // Consume data + trailing CRLF
 
@@ -812,7 +812,7 @@ namespace glz
       {
          // Process any existing data in buffer first
          if (connection->buffer->size() > 0) {
-            std::string_view data{asio::buffer_cast<const char*>(connection->buffer->data()),
+            std::string_view data{static_cast<const char*>(connection->buffer->data().data()),
                                   connection->buffer->size()};
             on_data(data);
             connection->buffer->consume(connection->buffer->size());
@@ -846,7 +846,7 @@ namespace glz
       {
          // Process existing buffer content first
          if (connection->buffer->size() > 0) {
-            std::string_view data{asio::buffer_cast<const char*>(connection->buffer->data()),
+            std::string_view data{static_cast<const char*>(connection->buffer->data().data()),
                                   connection->buffer->size()};
             on_data(data);
             connection->buffer->consume(connection->buffer->size());
@@ -873,7 +873,7 @@ namespace glz
                // Commit the received data and deliver immediately
                connection->buffer->commit(bytes_transferred);
 
-               std::string_view data{asio::buffer_cast<const char*>(connection->buffer->data()), bytes_transferred};
+               std::string_view data{static_cast<const char*>(connection->buffer->data().data()), bytes_transferred};
                on_data(data);
                connection->buffer->consume(bytes_transferred);
 
@@ -936,7 +936,7 @@ namespace glz
             }
 
             // Create a zero-copy view of the header data
-            std::string_view header_data{asio::buffer_cast<const char*>(response_buffer.data()), header_bytes};
+            std::string_view header_data{static_cast<const char*>(response_buffer.data().data()), header_bytes};
 
             // Parse status line from the view
             auto line_end = header_data.find("\r\n");
@@ -999,7 +999,7 @@ namespace glz
             }
 
             // Create the body string from the buffer, respecting content_length.
-            std::string response_body(asio::buffer_cast<const char*>(response_buffer.data()),
+            std::string response_body(static_cast<const char*>(response_buffer.data().data()),
                                       std::min(content_length, response_buffer.size()));
 
             response resp;
@@ -1138,7 +1138,7 @@ namespace glz
                                size_t header_size, // <-- NEW: The size of the header block from async_read_until
                                const url_parts& url, CompletionHandler&& handler)
       {
-         std::string_view header_section{asio::buffer_cast<const char*>(buffer->data()), header_size};
+         std::string_view header_section{static_cast<const char*>(buffer->data().data()), header_size};
 
          // Parse the status line from the view.
          auto line_end = header_section.find("\r\n");
@@ -1206,7 +1206,7 @@ namespace glz
                }
 
                // Directly construct the string from the buffer's contiguous memory.
-               std::string body(asio::buffer_cast<const char*>(buffer->data()), buffer->size());
+               std::string body(static_cast<const char*>(buffer->data().data()), buffer->size());
 
                response resp;
                resp.status_code = status_code;

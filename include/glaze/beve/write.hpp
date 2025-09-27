@@ -461,8 +461,10 @@ namespace glz
             b.resize(2 * k);
          }
 
-         std::memcpy(&b[ix], str.data(), n);
-         ix += n;
+         if (n) {
+            std::memcpy(&b[ix], str.data(), n);
+            ix += n;
+         }
       }
 
       template <auto Opts>
@@ -475,8 +477,10 @@ namespace glz
             b.resize(2 * k);
          }
 
-         std::memcpy(&b[ix], value.data(), n);
-         ix += n;
+         if (n) {
+            std::memcpy(&b[ix], value.data(), n);
+            ix += n;
+         }
       }
    };
 
@@ -577,8 +581,10 @@ namespace glz
                      b.resize(2 * k);
                   }
 
-                  std::memcpy(&b[ix], x.data(), n);
-                  ix += n;
+                  if (n) {
+                     std::memcpy(&b[ix], x.data(), n);
+                     ix += n;
+                  }
                };
 
                dump_array(args...);
@@ -955,7 +961,7 @@ namespace glz
    }
 
    template <write_supported<BEVE> T>
-   [[nodiscard]] error_ctx write_beve_untagged(T&& value)
+   [[nodiscard]] glz::expected<std::string, error_ctx> write_beve_untagged(T&& value)
    {
       return write<opts{.format = BEVE, .structs_as_arrays = true}>(std::forward<T>(value));
    }

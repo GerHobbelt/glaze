@@ -4,12 +4,16 @@ include(cmake/prelude.cmake)
 
 project(
     glaze
-    VERSION 5.4.1
+    VERSION 5.5.4
     LANGUAGES CXX
 )
 
 include(cmake/project-is-top-level.cmake)
 include(cmake/variables.cmake)
+
+if (PROJECT_IS_TOP_LEVEL)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
 
 add_library(glaze_glaze INTERFACE)
 add_library(glaze::glaze ALIAS glaze_glaze)

@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <asio.hpp>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -17,6 +16,7 @@
 
 #include "glaze/net/cors.hpp"
 #include "glaze/net/http_router.hpp"
+#include "glaze/net/openapi.hpp"
 #include "glaze/net/websocket_connection.hpp"
 
 // Conditionally include SSL headers only when needed
@@ -174,15 +174,15 @@ namespace glz
             std::string final_chunk = "0\r\n\r\n";
             auto buffer = std::make_shared<std::string>(std::move(final_chunk));
 
-            asio::async_write(*socket_, asio::buffer(*buffer), [self, buffer, handler](std::error_code, std::size_t) {
+            asio::async_write(*socket_, asio::buffer(*buffer), [self, buffer, handler](asio::error_code, std::size_t) {
                if (handler) handler();
-               std::error_code close_ec;
+               asio::error_code close_ec;
                self->socket_->close(close_ec);
             });
          }
          else {
             if (handler) handler();
-            std::error_code ec;
+            asio::error_code ec;
             socket_->close(ec);
          }
       }
@@ -393,7 +393,7 @@ namespace glz
             asio::ip::tcp::endpoint endpoint(asio::ip::make_address(address), port);
             acceptor = std::make_unique<asio::ip::tcp::acceptor>(*io_context, endpoint);
          }
-         catch (const std::exception& e) {
+         catch (...) {
             error_handler(std::make_error_code(std::errc::address_in_use), std::source_location::current());
          }
          return *this;
@@ -469,8 +469,8 @@ namespace glz
             }
             full_path += path;
 
-            for (const auto& [method, handle] : method_handlers) {
-               root_router.route(method, full_path, handle);
+            for (const auto& [method, route_entry] : method_handlers) {
+               root_router.route(method, full_path, route_entry.handle, route_entry.spec);
             }
          }
 
@@ -482,20 +482,35 @@ namespace glz
          return *this;
       }
 
-      inline http_router& route(http_method method, std::string_view path, handler handle)
+      inline http_router& route(http_method method, std::string_view path, handler handle, const route_spec& spec = {})
       {
-         return root_router.route(method, path, handle);
+         return root_router.route(method, path, handle, spec);
       }
 
-      inline http_router& get(std::string_view path, handler handle) { return root_router.get(path, handle); }
+      inline http_router& get(std::string_view path, handler handle, const route_spec& spec = {})
+      {
+         return root_router.get(path, handle, spec);
+      }
 
-      inline http_router& post(std::string_view path, handler handle) { return root_router.post(path, handle); }
+      inline http_router& post(std::string_view path, handler handle, const route_spec& spec = {})
+      {
+         return root_router.post(path, handle, spec);
+      }
 
-      inline http_router& put(std::string_view path, handler handle) { return root_router.put(path, handle); }
+      inline http_router& put(std::string_view path, handler handle, const route_spec& spec = {})
+      {
+         return root_router.put(path, handle, spec);
+      }
 
-      inline http_router& del(std::string_view path, handler handle) { return root_router.del(path, handle); }
+      inline http_router& del(std::string_view path, handler handle, const route_spec& spec = {})
+      {
+         return root_router.del(path, handle, spec);
+      }
 
-      inline http_router& patch(std::string_view path, handler handle) { return root_router.patch(path, handle); }
+      inline http_router& patch(std::string_view path, handler handle, const route_spec& spec = {})
+      {
+         return root_router.patch(path, handle, spec);
+      }
 
       // Register streaming route
       inline http_server& stream(http_method method, std::string_view path, streaming_handler handle)
@@ -518,6 +533,92 @@ namespace glz
       inline http_server& on_error(error_handler handle)
       {
          error_handler = std::move(handle);
+         return *this;
+      }
+
+      /**
+       * @brief Enable API inspection by exposing an OpenAPI 3.0 specification.
+       *
+       * This provides a standard, machine-readable way for clients to discover the API.
+       *
+       * @param path The path to expose the OpenAPI JSON specification on.
+       * @param title The title of the API.
+       * @param version The version of the API.
+       * @return Reference to this server for method chaining.
+       */
+      http_server& enable_openapi_spec(std::string_view path = "/openapi.json",
+                                       std::string_view title = "API Specification", std::string_view version = "1.0.0")
+      {
+         get(path, [this, title = std::string(title), version = std::string(version)](const request&, response& res) {
+            open_api spec{};
+            spec.info.title = title;
+            spec.info.version = version;
+
+            for (const auto& [route_path, method_handlers] : root_router.routes) {
+               // Convert router path /:param to OpenAPI path /{param}
+               std::string openapi_path = route_path;
+               size_t pos = 0;
+               while ((pos = openapi_path.find(':', pos)) != std::string::npos) {
+                  openapi_path.replace(pos, 1, "{");
+                  size_t end_pos = openapi_path.find('/', pos);
+                  if (end_pos == std::string::npos) {
+                     openapi_path.push_back('}');
+                  }
+                  else {
+                     openapi_path.insert(end_pos, "}");
+                  }
+               }
+
+               auto& path_item = spec.paths[openapi_path];
+
+               for (const auto& [method, route_entry] : method_handlers) {
+                  openapi_operation op;
+                  op.summary = route_entry.spec.description;
+                  if (!route_entry.spec.tags.empty()) {
+                     op.tags = route_entry.spec.tags;
+                  }
+                  op.operationId = std::string(to_string(method)) + route_path;
+                  op.responses["200"].description = "OK";
+
+                  // Extract path parameters
+                  auto segments = http_router::split_path(route_path);
+                  for (const auto& segment : segments) {
+                     if (!segment.empty() && segment.front() == ':') {
+                        if (!op.parameters) op.parameters.emplace();
+                        auto& param = op.parameters->emplace_back();
+                        param.name = segment.substr(1);
+                        param.in = "path";
+                        param.required = true;
+                        if (auto it = route_entry.spec.constraints.find(param.name);
+                            it != route_entry.spec.constraints.end()) {
+                           param.description = it->second.description;
+                        }
+                     }
+                  }
+
+                  switch (method) {
+                  case http_method::GET:
+                     path_item.get = op;
+                     break;
+                  case http_method::POST:
+                     path_item.post = op;
+                     break;
+                  case http_method::PUT:
+                     path_item.put = op;
+                     break;
+                  case http_method::DELETE:
+                     path_item.del = op;
+                     break;
+                  case http_method::PATCH:
+                     path_item.patch = op;
+                     break;
+                  default:
+                     break;
+                  }
+               }
+            }
+            res.json(spec);
+         });
          return *this;
       }
 
@@ -654,7 +755,7 @@ namespace glz
 
          asio::async_read_until(
             *socket_ptr, *buffer, "\r\n\r\n",
-            [this, socket_ptr, buffer, remote_endpoint](std::error_code ec, std::size_t /*bytes_transferred*/) {
+            [this, socket_ptr, buffer, remote_endpoint](asio::error_code ec, std::size_t /*bytes_transferred*/) {
                if (ec) {
                   // EOF is a normal disconnect, not a server error
                   if (ec != asio::error::eof) {
@@ -664,7 +765,7 @@ namespace glz
                }
 
                const auto data_size = buffer->size();
-               const char* data_ptr = asio::buffer_cast<const char*>(buffer->data());
+               const char* data_ptr = static_cast<const char*>(buffer->data().data());
                std::string_view request_view(data_ptr, data_size);
 
                size_t headers_end_pos = request_view.find("\r\n\r\n");
@@ -780,7 +881,7 @@ namespace glz
                   body.reserve(content_length);
                   // Append what's already in the buffer
                   const size_t initial_body_size = std::min(content_length, buffer->size());
-                  body.append(asio::buffer_cast<const char*>(buffer->data()), initial_body_size);
+                  body.append(static_cast<const char*>(buffer->data().data()), initial_body_size);
                   buffer->consume(initial_body_size);
 
                   if (body.length() < content_length) {
@@ -792,7 +893,7 @@ namespace glz
                                             return;
                                          }
                                          // Append newly read data
-                                         body.append(asio::buffer_cast<const char*>(buffer->data()), buffer->size());
+                                         body.append(static_cast<const char*>(buffer->data().data()), buffer->size());
                                          buffer->consume(buffer->size());
                                          process_full_request(socket_ptr, *method_opt, target, headers, std::move(body),
                                                               remote_endpoint);
