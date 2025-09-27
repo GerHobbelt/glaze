@@ -24,6 +24,8 @@
 #include "glaze/trace/trace.hpp"
 #include "ut/ut.hpp"
 
+using namespace ut;
+
 inline glz::trace trace{};
 
 struct my_struct
@@ -2522,6 +2524,117 @@ suite pair_ranges_tests = [] {
       std::vector<std::pair<int, int>> x;
       expect(!glz::read_beve(x, s));
       expect(x == v);
+   };
+};
+
+// Test for static variant tags with empty structs
+namespace static_tag_test
+{
+   enum class MsgTypeEmpty { A, B };
+
+   struct MsgAEmpty
+   {
+      static constexpr auto type = MsgTypeEmpty::A;
+   };
+
+   struct MsgBEmpty
+   {
+      static constexpr auto type = MsgTypeEmpty::B;
+   };
+
+   using MsgEmpty = std::variant<MsgAEmpty, MsgBEmpty>;
+
+   enum class MsgType { A, B };
+
+   struct MsgA
+   {
+      static constexpr auto type = MsgType::A;
+      int value = 42;
+   };
+
+   struct MsgB
+   {
+      static constexpr auto type = MsgType::B;
+      std::string text = "hello";
+   };
+
+   using Msg = std::variant<MsgA, MsgB>;
+}
+
+suite static_variant_tags = [] {
+   "static variant tags with empty structs"_test = [] {
+      using namespace static_tag_test;
+
+      // Test untagged BEVE with empty structs having static tags
+      {
+         MsgEmpty original{MsgAEmpty{}};
+         auto encoded = glz::write_beve_untagged(original);
+         expect(encoded.has_value());
+
+         auto decoded = glz::read_binary_untagged<MsgEmpty>(*encoded);
+         expect(decoded.has_value());
+         expect(decoded->index() == 0);
+      }
+
+      {
+         MsgEmpty original{MsgBEmpty{}};
+         auto encoded = glz::write_beve_untagged(original);
+         expect(encoded.has_value());
+
+         auto decoded = glz::read_binary_untagged<MsgEmpty>(*encoded);
+         expect(decoded.has_value());
+         expect(decoded->index() == 1);
+      }
+   };
+
+   "static variant tags with non-empty structs"_test = [] {
+      using namespace static_tag_test;
+
+      // Test untagged BEVE with non-empty structs having static tags
+      {
+         Msg original{MsgA{}};
+         auto encoded = glz::write_beve_untagged(original);
+         expect(encoded.has_value());
+
+         auto decoded = glz::read_binary_untagged<Msg>(*encoded);
+         expect(decoded.has_value());
+         expect(decoded->index() == 0);
+         expect(std::get<0>(*decoded).value == 42);
+      }
+
+      {
+         Msg original{MsgB{}};
+         auto encoded = glz::write_beve_untagged(original);
+         expect(encoded.has_value());
+
+         auto decoded = glz::read_binary_untagged<Msg>(*encoded);
+         expect(decoded.has_value());
+         expect(decoded->index() == 1);
+         expect(std::get<1>(*decoded).text == "hello");
+      }
+   };
+};
+
+suite explicit_string_view_support = [] {
+   "write beve from explicit string_view"_test = [] {
+      struct explicit_string_view_type
+      {
+         std::string storage{};
+
+         explicit explicit_string_view_type(std::string_view s) : storage(s) {}
+
+         explicit operator std::string_view() const noexcept { return storage; }
+      };
+
+      explicit_string_view_type value{std::string_view{"explicit"}};
+
+      std::string buffer{};
+      expect(not glz::write_beve(value, buffer));
+      expect(not buffer.empty());
+
+      std::string decoded{};
+      expect(not glz::read_beve(decoded, buffer));
+      expect(decoded == "explicit");
    };
 };
 

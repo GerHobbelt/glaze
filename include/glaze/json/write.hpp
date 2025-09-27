@@ -469,20 +469,6 @@ namespace glz
       }
    };
 
-   inline constexpr std::array<uint16_t, 256> char_escape_table = [] {
-      auto combine = [](const char chars[2]) -> uint16_t { return uint16_t(chars[0]) | (uint16_t(chars[1]) << 8); };
-
-      std::array<uint16_t, 256> t{};
-      t['\b'] = combine(R"(\b)");
-      t['\t'] = combine(R"(\t)");
-      t['\n'] = combine(R"(\n)");
-      t['\f'] = combine(R"(\f)");
-      t['\r'] = combine(R"(\r)");
-      t['\"'] = combine(R"(\")");
-      t['\\'] = combine(R"(\\)");
-      return t;
-   }();
-
    template <class T>
       requires str_t<T> || char_t<T>
    struct to<JSON, T>
@@ -544,7 +530,7 @@ namespace glz
                      return value ? value : "";
                   }
                   else {
-                     return value;
+                     return sv{value};
                   }
                }();
 
@@ -578,7 +564,7 @@ namespace glz
                      return *value.data() ? sv{value.data()} : "";
                   }
                   else {
-                     return value;
+                     return sv{value};
                   }
                }();
                const auto n = str.size();
