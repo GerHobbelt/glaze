@@ -75,6 +75,7 @@ nav:
    - Generic JSON: generic-json.md
  - Reflection:
    - Pure Reflection: pure-reflection.md
+   - Modify Reflection: modify-reflection.md
  - Formats:
    - JSON: json.md
    - CSV: csv.md
@@ -109,7 +110,6 @@ nav:
    - JSON Include: json-include.md
    - CLI Menu: cli-menu.md
    - Glaze Interfaces: glaze-interfaces.md
-   - FFI Shared Library (Interop): interop.md
  - Data Recording/Logging:
    - Time Trace Profiles: time-trace.md
    - Data Recorder: recorder.md
