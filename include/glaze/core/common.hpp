@@ -13,6 +13,8 @@
 
 #include "glaze/concepts/container_concepts.hpp"
 #include "glaze/core/array_apply.hpp"
+#include "glaze/core/cast.hpp"
+#include "glaze/core/constraint.hpp"
 #include "glaze/core/context.hpp"
 #include "glaze/core/feature_test.hpp"
 #include "glaze/core/meta.hpp"
@@ -226,12 +228,12 @@ namespace glz
    // this concept requires that T is a writeable string. It can be resized, appended to, or assigned to
    template <class T>
    concept string_t = str_t<T> && !string_view_t<T> &&
-                      (has_assign<T> || (resizable<T> && has_data<T>) || has_append<T>)&&!is_static_string<T>;
+                      (has_assign<T> || (resizable<T> && has_data<T>) || has_append<T>) && !is_static_string<T>;
 
    // static string; very like `string_t`, but with a fixed max capacity
    template <class T>
    concept static_string_t = str_t<T> && !string_view_t<T> &&
-                             (has_assign<T> || (resizable<T> && has_data<T>) || has_append<T>)&&is_static_string<T>;
+                             (has_assign<T> || (resizable<T> && has_data<T>) || has_append<T>) && is_static_string<T>;
 
    template <class T>
    concept char_array_t = str_t<T> && std::is_array_v<std::remove_pointer_t<std::remove_reference_t<T>>>;
@@ -253,7 +255,7 @@ namespace glz
    };
 
    template <class T>
-   concept array_t = (!meta_value_t<T> && !str_t<T> && !(readable_map_t<T> || writable_map_t<T>)&&range<T>);
+   concept array_t = (!meta_value_t<T> && !str_t<T> && !(readable_map_t<T> || writable_map_t<T>) && range<T>);
 
    template <class T>
    concept readable_array_t =
@@ -339,9 +341,7 @@ namespace glz
    template <class T>
    concept nullable_t = !meta_value_t<T> && !str_t<T> && requires(T t) {
       bool(t);
-      {
-         *t
-      };
+      { *t };
    };
 
    template <class T>
@@ -351,9 +351,7 @@ namespace glz
    template <class T>
    concept nullable_value_t = !meta_value_t<T> && requires(T t) {
       t.value();
-      {
-         t.has_value()
-      } -> std::convertible_to<bool>;
+      { t.has_value() } -> std::convertible_to<bool>;
    };
 
    template <class T>
@@ -411,9 +409,16 @@ namespace glz
    };
 
    template <is_variant T, size_t... I>
-   constexpr auto make_variant_id_map_impl(std::index_sequence<I...>, auto&& variant_ids)
+   constexpr auto make_variant_sv_id_map_impl(std::index_sequence<I...>, auto&& variant_ids)
    {
       return normal_map<sv, size_t, std::variant_size_v<T>>(std::array{pair<sv, size_t>{sv(variant_ids[I]), I}...});
+   }
+
+   template <is_variant T, size_t... I>
+   constexpr auto make_variant_id_map_impl(std::index_sequence<I...>, auto&& variant_ids)
+   {
+      using id_type = std::decay_t<decltype(ids_v<T>[0])>;
+      return normal_map<id_type, size_t, std::variant_size_v<T>>(std::array{pair{variant_ids[I], I}...});
    }
 
    template <is_variant T>
@@ -421,7 +426,14 @@ namespace glz
    {
       constexpr auto indices = std::make_index_sequence<std::variant_size_v<T>>{};
 
-      return make_variant_id_map_impl<T>(indices, ids_v<T>);
+      using id_type = std::decay_t<decltype(ids_v<T>[0])>;
+
+      if constexpr (std::integral<id_type>) {
+         return make_variant_id_map_impl<T>(indices, ids_v<T>);
+      }
+      else {
+         return make_variant_sv_id_map_impl<T>(indices, ids_v<T>);
+      }
    }
 
    /**
@@ -608,6 +620,7 @@ struct glz::meta<glz::error_code>
                                     "invalid_variant_string",
                                     "no_matching_variant_type",
                                     "expected_true_or_false",
+                                    "constraint_violated",
                                     "key_not_found",
                                     "unknown_key",
                                     "missing_key",
@@ -672,6 +685,7 @@ struct glz::meta<glz::error_code>
                                      invalid_variant_string, //
                                      no_matching_variant_type, //
                                      expected_true_or_false, //
+                                     constraint_violated, //
                                      // Key errors
                                      key_not_found, //
                                      unknown_key, //

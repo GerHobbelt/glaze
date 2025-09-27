@@ -452,6 +452,53 @@ suite custom_lambdas_test = [] {
 
 </details>
 
+### Error handling with `glz::custom`
+
+Developers can throw errors, but for builds that disable exceptions or if it is desirable to integrate error handling within Glaze's `context`, the last argument of custom lambdas may be a `glz::context&`. This enables custom error handling that integrates well with the rest of Glaze.
+
+<details><summary>See example:</summary>
+
+```c++
+struct age_custom_error_obj
+{
+   int age{};
+};
+
+template <>
+struct glz::meta<age_custom_error_obj>
+{
+   using T = age_custom_error_obj;
+   static constexpr auto read_x = [](T& s, int age, glz::context& ctx) {
+      if (age < 21) {
+         ctx.error = glz::error_code::constraint_violated;
+         ctx.custom_error_message = "age too young";
+      }
+      else {
+         s.age = age;
+      }
+   };
+   static constexpr auto value = object("age", glz::custom<read_x, &T::age>);
+};
+```
+
+In use:
+```c++
+age_custom_error_obj obj{};
+std::string s = R"({"age":18})";
+auto ec = glz::read_json(obj, s);
+auto err_msg = glz::format_error(ec, s);
+std::cout << err_msg << '\n';
+```
+
+Console output:
+```
+1:10: constraint_violated
+   {"age":18}
+            ^ age too young
+```
+
+</details>
+
 # Object Mapping
 
 When using member pointers (e.g. `&T::a`) the C++ class structures must match the JSON interface. It may be desirable to map C++ classes with differing layouts to the same object interface. This is accomplished through registering lambda functions instead of member pointers.
@@ -494,6 +541,45 @@ struct glz::meta<S> {
   static constexpr auto value = [](auto& self) -> auto& { return self.x; };
 };
 ```
+
+# Read Constraints
+
+Glaze provides a wrapper to enable complex reading constraints for struct members: `glz::read_constraint`.
+
+```c++
+struct constrained_object
+{
+   int age{};
+   std::string name{};
+};
+
+template <>
+struct glz::meta<constrained_object>
+{
+   using T = constrained_object;
+   static constexpr auto limit_age = [](const T&, int age) {
+      return (age >= 0 && age <= 120);
+   };
+   
+   static constexpr auto limit_name = [](const T&, const std::string& name) {
+      return name.size() <= 8;
+   };
+   
+   static constexpr auto value = object("age", read_constraint<&T::age, limit_age, "Age out of range">, //
+                                        "name", read_constraint<&T::name, limit_name, "Name is too long">);
+};
+```
+
+For invalid input such as `{"age": -1, "name": "Victor"}`, Glaze will outut the following formatted error message:
+
+```
+1:11: constraint_violated
+   {"age": -1, "name": "Victor"}
+             ^ Age out of range
+```
+
+- Member functions can also be registered as the constraint. 
+- The first field of the constraint lambda is the parent object, allowing complex constraints to be written by the user.
 
 # Reading/Writing Private Fields
 
@@ -860,11 +946,6 @@ struct opts
                                       // skip_null_members = false to require nullable members
   bool error_on_const_read =
      false; // Error if attempt is made to read into a const value, by default the value is skipped without error
-
-  uint8_t layout = rowwise; // CSV row wise output/input
-
-  // The maximum precision type used for writing floats, higher precision floats will be cast down to this precision
-  float_precision float_max_write_precision{};
 
   bool bools_as_numbers = false; // Read and write booleans with 1's and 0's
 

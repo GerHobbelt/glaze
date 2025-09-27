@@ -310,7 +310,6 @@ namespace glz
             }
          }
          else {
-            // We see better performance with function pointers than a glz::jump_table here.
             visit<N>([&]<size_t I>() { decode_index<Opts, T, I>(value, ctx, it, end, selected_index...); }, index);
          }
       }
@@ -1004,13 +1003,15 @@ namespace glz
 
                      it = start;
                      while (it < end) [[likely]] {
-                        *p = *it;
                         if (*it == '"') {
                            value.resize(size_t(p - value.data()));
                            ++it;
                            return;
                         }
-                        else if (*it == '\\') {
+
+                        *p = *it;
+
+                        if (*it == '\\') {
                            ++it; // skip the escape
                            if (*it == 'u') {
                               ++it;
@@ -1300,7 +1301,7 @@ namespace glz
                return;
             }
 
-            jump_table<N>([&]<size_t I>() { decode_index<Opts, T, I>(value, ctx, it, end); }, index);
+            visit<N>([&]<size_t I>() { decode_index<Opts, T, I>(value, ctx, it, end); }, index);
          }
       }
    };
@@ -1826,7 +1827,7 @@ namespace glz
             return;
          }
 
-         invoke_table<N>([&]<size_t I>() {
+         for_each<N>([&]<size_t I>() {
             if (bool(ctx.error)) [[unlikely]]
                return;
 
@@ -2092,7 +2093,7 @@ namespace glz
    }
 
    template <class T>
-      requires readable_map_t<T> || glaze_object_t<T> || reflectable<T>
+      requires((readable_map_t<T> || glaze_object_t<T> || reflectable<T>) && not custom_read<T>)
    struct from<JSON, T>
    {
       template <auto Options, string_literal tag = "">
@@ -2126,7 +2127,7 @@ namespace glz
          }
          const size_t ws_size = size_t(it - ws_start);
 
-         if constexpr ((glaze_object_t<T> || reflectable<T>)&&num_members == 0 && Opts.error_on_unknown_keys) {
+         if constexpr ((glaze_object_t<T> || reflectable<T>) && num_members == 0 && Opts.error_on_unknown_keys) {
             if constexpr (not tag.sv().empty()) {
                if (*it == '"') {
                   ++it;
@@ -2191,7 +2192,8 @@ namespace glz
          }
          else {
             decltype(auto) fields = [&]() -> decltype(auto) {
-               if constexpr ((glaze_object_t<T> || reflectable<T>)&&(Opts.error_on_missing_keys || Opts.partial_read)) {
+               if constexpr ((glaze_object_t<T> || reflectable<T>) &&
+                             (Opts.error_on_missing_keys || Opts.partial_read)) {
                   return bit_array<num_members>{};
                }
                else {
@@ -2203,7 +2205,7 @@ namespace glz
 
             bool first = true;
             while (true) {
-               if constexpr ((glaze_object_t<T> || reflectable<T>)&&Opts.partial_read) {
+               if constexpr ((glaze_object_t<T> || reflectable<T>) && Opts.partial_read) {
                   static constexpr bit_array<num_members> all_fields = [] {
                      bit_array<num_members> arr{};
                      for (size_t i = 0; i < num_members; ++i) {
@@ -2222,16 +2224,24 @@ namespace glz
                   if constexpr (not Opts.null_terminated) {
                      --ctx.indentation_level;
                   }
-                  if constexpr ((glaze_object_t<T> ||
-                                 reflectable<T>)&&(Opts.partial_read && Opts.error_on_missing_keys)) {
+                  if constexpr ((glaze_object_t<T> || reflectable<T>) &&
+                                (Opts.partial_read && Opts.error_on_missing_keys)) {
                      ctx.error = error_code::missing_key;
                      return;
                   }
                   else {
                      ++it;
-                     if constexpr ((glaze_object_t<T> || reflectable<T>)&&Opts.error_on_missing_keys) {
+                     if constexpr ((glaze_object_t<T> || reflectable<T>) && Opts.error_on_missing_keys) {
                         constexpr auto req_fields = required_fields<T, Opts>();
                         if ((req_fields & fields) != req_fields) {
+                           for (size_t i = 0; i < num_members; ++i) {
+                              if (not fields[i]) {
+                                 ctx.custom_error_message = reflect<T>::keys[i];
+                                 // We just return the first missing key in order to avoid heap allocations
+                                 break;
+                              }
+                           }
+
                            ctx.error = error_code::missing_key;
                            return;
                         }
@@ -2483,7 +2493,7 @@ namespace glz
       // unique combinations of keys
       int bools{}, numbers{}, strings{}, objects{}, meta_objects{}, arrays{};
       constexpr auto N = std::variant_size_v<T>;
-      for_each<N>([&](auto I) {
+      for_each<N>([&]<auto I>() {
          using V = std::decay_t<std::variant_alternative_t<I, T>>;
          // ICE workaround
          bools += bool_t<V>;
@@ -2566,7 +2576,7 @@ namespace glz
          else {
             using const_glaze_types = typename tuple_types<Tuple>::glaze_const_types;
             bool found_match{};
-            for_each<glz::tuple_size_v<const_glaze_types>>([&]([[maybe_unused]] auto I) {
+            for_each<glz::tuple_size_v<const_glaze_types>>([&]<size_t I>() {
                if (found_match) {
                   return;
                }
@@ -2701,8 +2711,16 @@ namespace glz
                               if (parse_ws_colon<Opts>(ctx, it, end)) {
                                  return;
                               }
-                              sv type_id{};
-                              from<JSON, sv>::template op<ws_handled<Opts>()>(type_id, ctx, it, end);
+
+                              using id_type = std::decay_t<decltype(ids_v<T>[0])>;
+
+                              std::conditional_t<std::integral<id_type>, id_type, sv> type_id{};
+                              if constexpr (std::integral<id_type>) {
+                                 from<JSON, id_type>::template op<ws_handled<Opts>()>(type_id, ctx, it, end);
+                              }
+                              else {
+                                 from<JSON, sv>::template op<ws_handled<Opts>()>(type_id, ctx, it, end);
+                              }
                               if (bool(ctx.error)) [[unlikely]]
                                  return;
                               if (skip_ws<Opts>(ctx, it, end)) {

@@ -212,8 +212,7 @@ namespace glz
    template <char delim>
    inline void goto_delim(auto&& it, auto&& end) noexcept
    {
-      while (++it != end && *it != delim)
-         ;
+      while (++it != end && *it != delim);
    }
 
    inline auto read_column_wise_keys(auto&& ctx, auto&& it, auto&& end)
@@ -564,7 +563,7 @@ namespace glz
    };
 
    template <class T>
-      requires(glaze_object_t<T> || reflectable<T>)
+      requires((glaze_object_t<T> || reflectable<T>) && not custom_read<T>)
    struct from<CSV, T>
    {
       template <auto Opts, class It>
