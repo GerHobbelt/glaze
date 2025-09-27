@@ -6,20 +6,21 @@ Glaze also supports:
 
 - [BEVE](https://github.com/beve-org/beve) (binary efficient versatile encoding)
 - [CSV](./docs/csv.md) (comma separated value)
+- [Stencil/Mustache](./docs/stencil.md) (string interpolation)
 - [EETF](./docs/EETF/erlang-external-term-format.md) (Erlang External Term Format) [optionally included]
 
-> [!IMPORTANT]
+> [!NOTE]
 >
-> Glaze [v5.0.0](https://github.com/stephenberry/glaze/releases/tag/v5.0.0) has been released! See release for more details, but the critical changes are:
->
-> v5.0.0 removes the `detail` namespace from `to/from` specializations and many more internal functions, which enables cleaner user customization and shorter compiler error messages.
->
-> The `glz::opts` struct is now only the default options. Specialized options can be added to custom option structs. See [Options](./docs/options.md) for new compile time option customization. This reduces the length of compiler errors.
+> Glaze is getting HTTP support with REST servers, clients, websockets, and more. The networking side of Glaze is under active development, and while it is usable and feedback is desired, the API is likely to be changing and improving.
 
 ## With compile time reflection for MSVC, Clang, and GCC!
 
 - Read/write aggregate initializable structs without writing any metadata or macros!
 - See [example on Compiler Explorer](https://gcc.godbolt.org/z/T4To5fKfz)
+
+## [📖 Documentation](https://stephenberry.github.io/glaze/)
+
+See this README, the [Glaze Documentation Page](https://stephenberry.github.io/glaze/), or [docs folder](https://github.com/stephenberry/glaze/tree/main/docs) for documentation.
 
 ## Highlights
 
@@ -48,20 +49,19 @@ Glaze also supports:
 - [CSV Reading/Writing](./docs/csv.md)
 - [Much more!](#more-features)
 
-See [DOCS](https://github.com/stephenberry/glaze/tree/main/docs) for more documentation.
-
 ## Performance
 
 | Library                                                      | Roundtrip Time (s) | Write (MB/s) | Read (MB/s) |
 | ------------------------------------------------------------ | ------------------ | ------------ | ----------- |
-| [**Glaze**](https://github.com/stephenberry/glaze)           | **1.04**           | **1366**     | **1224**    |
-| [**simdjson (on demand)**](https://github.com/simdjson/simdjson) | **N/A**            | **N/A**      | **1198**    |
-| [**yyjson**](https://github.com/ibireme/yyjson)              | **1.23**           | **1005**     | **1107**    |
-| [**daw_json_link**](https://github.com/beached/daw_json_link) | **2.93**           | **365**      | **553**     |
-| [**RapidJSON**](https://github.com/Tencent/rapidjson)        | **3.65**           | **290**      | **450**     |
-| [**Boost.JSON (direct)**](https://boost.org/libs/json)       | **4.76**           | **199**      | **447**     |
-| [**json_struct**](https://github.com/jorgen/json_struct)     | **5.50**           | **182**      | **326**     |
-| [**nlohmann**](https://github.com/nlohmann/json)             | **15.71**          | **84**       | **80**      |
+| [**Glaze**](https://github.com/stephenberry/glaze)           | **1.01**           | **1396**     | **1200**    |
+| [**simdjson (on demand)**](https://github.com/simdjson/simdjson) | **N/A**            | **N/A**      | **1163**    |
+| [**yyjson**](https://github.com/ibireme/yyjson)              | **1.22**           | **1023**     | **1106**    |
+| [**reflect_cpp**](https://github.com/getml/reflect-cpp)      | **3.15**           | **488**      | **365**     |
+| [**daw_json_link**](https://github.com/beached/daw_json_link) | **3.29**           | **334**      | **479**     |
+| [**RapidJSON**](https://github.com/Tencent/rapidjson)        | **3.76**           | **289**      | **416**     |
+| [**json_struct**](https://github.com/jorgen/json_struct)     | **5.87**           | **178**      | **316**     |
+| [**Boost.JSON**](https://boost.org/libs/json)                | **5.38**           | **198**      | **308**     |
+| [**nlohmann**](https://github.com/nlohmann/json)             | **15.44**          | **86**       | **81**      |
 
 [Performance test code available here](https://github.com/stephenberry/json_performance)
 
@@ -73,8 +73,8 @@ See [DOCS](https://github.com/stephenberry/glaze/tree/main/docs) for more docume
 
 | Library                                                      | Read (MB/s) |
 | ------------------------------------------------------------ | ----------- |
-| [**Glaze**](https://github.com/stephenberry/glaze)           | **678**     |
-| [**simdjson (on demand)**](https://github.com/simdjson/simdjson) | **93**      |
+| [**Glaze**](https://github.com/stephenberry/glaze)           | **1219**    |
+| [**simdjson (on demand)**](https://github.com/simdjson/simdjson) | **89**      |
 
 ## Binary Performance
 
@@ -669,13 +669,11 @@ auto ec = glz::read<options>(value, buffer); // read in a non-null terminated bu
 
 ## BEVE
 
-Null-termination is not required when parsing BEVE (binary). It makes no difference in performance.
+Null-termination is not required for BEVE (binary). It makes no difference in performance.
 
 ## CSV
 
-> [!WARNING]
->
-> Currently, `null_terminated = false` is not valid for CSV parsing and buffers must be null terminated.
+Null-termination is not required for CSV. It makes no difference in performance.
 
 
 # Type Support
