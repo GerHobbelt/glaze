@@ -321,6 +321,11 @@ namespace glz
 
                fields[I] = !Opts.skip_null_members || !(std::same_as<From, skip> || nullable_in_custom);
             }
+            else if constexpr (is_cast<V>) {
+               // Handle cast_t by checking if the cast type is nullable
+               using CastType = typename V::cast_type;
+               fields[I] = !Opts.skip_null_members || !null_t<CastType>;
+            }
             else {
                fields[I] = !Opts.skip_null_members || !null_t<V>;
             }
@@ -2065,6 +2070,21 @@ namespace glz
             (callable(get_member(value, get<I>(reflect<T>::values))), ...);
          }(std::make_index_sequence<N>{});
       }
+   }
+
+   // Check if a type has a member with a specific name
+   template <class T>
+   consteval bool has_member_with_name(const sv& name) noexcept
+   {
+      if constexpr (reflectable<T> || glaze_object_t<T>) {
+         constexpr auto N = reflect<T>::size;
+         for (size_t i = 0; i < N; ++i) {
+            if (reflect<T>::keys[i] == name) {
+               return true;
+            }
+         }
+      }
+      return false;
    }
 }
 

@@ -11,6 +11,9 @@
 #if !defined(GLZ_DISABLE_SIMD) && (defined(__x86_64__) || defined(_M_X64))
 #if defined(_MSC_VER)
 #include <intrin.h>
+#pragma warning(push)
+#pragma warning( \
+   disable : 4702) // disable "unreachable code" warnings, which are often invalid due to constexpr branching
 #else
 #include <immintrin.h>
 #endif
@@ -1354,7 +1357,8 @@ namespace glz
             [&](auto&& val) {
                using V = std::decay_t<decltype(val)>;
 
-               if constexpr (check_write_type_info(Opts) && not tag_v<T>.empty() && glaze_object_t<V>) {
+               if constexpr (check_write_type_info(Opts) && not tag_v<T>.empty() &&
+                             (glaze_object_t<V> || (reflectable<V> && !has_member_with_name<V>(tag_v<T>)))) {
                   constexpr auto N = reflect<V>::size;
 
                   // must first write out type
@@ -2034,3 +2038,7 @@ namespace glz
       return {buffer_to_file(buffer, file_name)};
    }
 }
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif

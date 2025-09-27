@@ -63,6 +63,16 @@ struct glz::meta<my_struct>
 static_assert(glz::write_supported<my_struct, glz::JSON>);
 static_assert(glz::read_supported<my_struct, glz::JSON>);
 
+struct Issue1866
+{
+   std::string uniqueName;
+   std::string name{};
+   std::string description{};
+   bool codexSecret{};
+   std::optional<bool> excludeFromCodex{};
+   std::string parentName{};
+};
+
 suite starter = [] {
    "example"_test = [] {
       my_struct s{};
@@ -1896,7 +1906,7 @@ suite bench = [] {
       trace.begin("json_ptr_bench");
       tstart = std::chrono::high_resolution_clock::now();
       for (size_t i{}; i < repeat; ++i) {
-         glz::get<std::string>(thing, "/thing_ptr/b");
+         std::ignore = glz::get<std::string>(thing, "/thing_ptr/b");
       }
       tend = std::chrono::high_resolution_clock::now();
       trace.end("json_ptr_bench", "JSON pointer benchmark");
@@ -3406,7 +3416,7 @@ suite tagged_variant_tests = [] {
       auto s = glz::write_json_schema<tagged_variant>().value_or("error");
       expect(
          s ==
-         R"({"type":["object"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"action":{"const":"PUT"},"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"}},"additionalProperties":false,"required":["action"],"title":"PUT"},{"type":["object"],"properties":{"action":{"const":"DELETE"},"data":{"$ref":"#/$defs/std::string"}},"additionalProperties":false,"required":["action"],"title":"DELETE"}]})")
+         R"({"type":["object"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"action":{"const":"PUT"},"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"}},"additionalProperties":false,"required":["action"],"title":"PUT"},{"type":["object"],"properties":{"action":{"const":"DELETE"},"data":{"$ref":"#/$defs/std::string"}},"additionalProperties":false,"required":["action"],"title":"DELETE"}],"title":"std::variant<put_action, delete_action>"})")
          << s;
    };
 
@@ -3441,7 +3451,7 @@ suite tagged_variant_tests = [] {
       const auto schema = glz::write_json_schema<std::shared_ptr<tagged_variant2>>().value_or("error");
       expect(
          schema ==
-         R"({"type":["object","null"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"type":{"const":"put_action"}},"additionalProperties":false,"required":["type"],"title":"put_action"},{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::string"},"type":{"const":"delete_action"}},"additionalProperties":false,"required":["type"],"title":"delete_action"},{"type":["null"],"title":"std::monostate","const":null}]})")
+         R"({"type":["object","null"],"$defs":{"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::string":{"type":["string"]}},"oneOf":[{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"type":{"const":"put_action"}},"additionalProperties":false,"required":["type"],"title":"put_action"},{"type":["object"],"properties":{"data":{"$ref":"#/$defs/std::string"},"type":{"const":"delete_action"}},"additionalProperties":false,"required":["type"],"title":"delete_action"},{"type":["null"],"title":"std::monostate","const":null}],"title":"std::shared_ptr<std::variant<put_action, delete_action, std::monostate>>"})")
          << schema;
    };
 };
@@ -3558,6 +3568,229 @@ suite variant_tests = [] {
       expect(read.has_value());
       expect(std::holds_alternative<Color>(read.value()));
       expect(std::get<Color>(read.value()) == Color::Red);
+   };
+
+   "variant read tuple"_test = [] {
+      using int_int_tuple_t = std::tuple<int, int>;
+      std::variant<int, int_int_tuple_t, std::string> var;
+
+      expect(glz::read_json(var, R"(1)") == glz::error_code::none);
+      expect(std::get<int>(var) == 1);
+
+      expect(glz::read_json(var, R"("str")") == glz::error_code::none);
+      expect(std::get<std::string>(var) == "str");
+
+      expect(glz::read_json(var, R"([2, 3])") == glz::error_code::none);
+      expect(std::get<int_int_tuple_t>(var) == int_int_tuple_t{2, 3});
+   };
+};
+
+// Tests for std::vector<std::variant<...>> with purely reflected structs
+struct reflected_person
+{
+   std::string name{};
+   int age{};
+   double height{};
+};
+
+struct reflected_animal
+{
+   std::string species{};
+   std::string name{};
+   int weight{};
+};
+
+struct reflected_vehicle
+{
+   std::string make{};
+   std::string model{};
+   int year{};
+   double price{};
+};
+
+struct reflected_book
+{
+   std::string title{};
+   std::string author{};
+   int pages{};
+   std::string isbn{};
+};
+
+static_assert(glz::reflectable<reflected_person>);
+static_assert(glz::reflectable<reflected_animal>);
+static_assert(glz::reflectable<reflected_vehicle>);
+static_assert(glz::reflectable<reflected_book>);
+
+suite vector_variant_reflection_tests = [] {
+   "vector of variant with two reflected structs"_test = [] {
+      using entity_variant = std::variant<reflected_person, reflected_animal>;
+      std::vector<entity_variant> entities;
+
+      entities.push_back(reflected_person{"Alice", 30, 165.5});
+      entities.push_back(reflected_animal{"Dog", "Buddy", 25});
+      entities.push_back(reflected_person{"Bob", 25, 180.0});
+      entities.push_back(reflected_animal{"Cat", "Whiskers", 4});
+
+      std::string json;
+      expect(!glz::write_json(entities, json));
+
+      std::vector<entity_variant> read_entities;
+      expect(glz::read_json(read_entities, json) == glz::error_code::none);
+
+      expect(read_entities.size() == 4);
+
+      expect(std::holds_alternative<reflected_person>(read_entities[0]));
+      auto& p1 = std::get<reflected_person>(read_entities[0]);
+      expect(p1.name == "Alice");
+      expect(p1.age == 30);
+      expect(p1.height == 165.5);
+
+      expect(std::holds_alternative<reflected_animal>(read_entities[1]));
+      auto& a1 = std::get<reflected_animal>(read_entities[1]);
+      expect(a1.species == "Dog");
+      expect(a1.name == "Buddy");
+      expect(a1.weight == 25);
+
+      expect(std::holds_alternative<reflected_person>(read_entities[2]));
+      auto& p2 = std::get<reflected_person>(read_entities[2]);
+      expect(p2.name == "Bob");
+      expect(p2.age == 25);
+      expect(p2.height == 180.0);
+
+      expect(std::holds_alternative<reflected_animal>(read_entities[3]));
+      auto& a2 = std::get<reflected_animal>(read_entities[3]);
+      expect(a2.species == "Cat");
+      expect(a2.name == "Whiskers");
+      expect(a2.weight == 4);
+   };
+
+   "vector of variant with three reflected structs"_test = [] {
+      using item_variant = std::variant<reflected_person, reflected_vehicle, reflected_book>;
+      std::vector<item_variant> items;
+
+      items.push_back(reflected_person{"Charlie", 35, 175.0});
+      items.push_back(reflected_vehicle{"Toyota", "Camry", 2022, 25000.0});
+      items.push_back(reflected_book{"The Great Gatsby", "F. Scott Fitzgerald", 180, "978-0-7432-7356-5"});
+      items.push_back(reflected_person{"Diana", 28, 160.0});
+
+      std::string json;
+      expect(!glz::write_json(items, json));
+
+      std::vector<item_variant> read_items;
+      expect(glz::read_json(read_items, json) == glz::error_code::none);
+
+      expect(read_items.size() == 4);
+
+      expect(std::holds_alternative<reflected_person>(read_items[0]));
+      expect(std::holds_alternative<reflected_vehicle>(read_items[1]));
+      expect(std::holds_alternative<reflected_book>(read_items[2]));
+      expect(std::holds_alternative<reflected_person>(read_items[3]));
+
+      auto& vehicle = std::get<reflected_vehicle>(read_items[1]);
+      expect(vehicle.make == "Toyota");
+      expect(vehicle.model == "Camry");
+      expect(vehicle.year == 2022);
+      expect(vehicle.price == 25000.0);
+
+      auto& book = std::get<reflected_book>(read_items[2]);
+      expect(book.title == "The Great Gatsby");
+      expect(book.author == "F. Scott Fitzgerald");
+      expect(book.pages == 180);
+      expect(book.isbn == "978-0-7432-7356-5");
+   };
+
+   "empty vector of variant"_test = [] {
+      using entity_variant = std::variant<reflected_person, reflected_animal>;
+      std::vector<entity_variant> entities;
+
+      std::string json;
+      expect(!glz::write_json(entities, json));
+      expect(json == "[]");
+
+      std::vector<entity_variant> read_entities;
+      expect(glz::read_json(read_entities, json) == glz::error_code::none);
+      expect(read_entities.empty());
+   };
+
+   "vector with single variant element"_test = [] {
+      using entity_variant = std::variant<reflected_person, reflected_animal>;
+      std::vector<entity_variant> entities;
+
+      entities.push_back(reflected_person{"Eve", 40, 170.0});
+
+      std::string json;
+      expect(!glz::write_json(entities, json));
+
+      std::vector<entity_variant> read_entities;
+      expect(glz::read_json(read_entities, json) == glz::error_code::none);
+
+      expect(read_entities.size() == 1);
+      expect(std::holds_alternative<reflected_person>(read_entities[0]));
+      auto& person = std::get<reflected_person>(read_entities[0]);
+      expect(person.name == "Eve");
+      expect(person.age == 40);
+      expect(person.height == 170.0);
+   };
+
+   "roundtrip with mixed types"_test = [] {
+      using mixed_variant = std::variant<reflected_person, reflected_animal, reflected_vehicle, reflected_book>;
+      std::vector<mixed_variant> original;
+
+      original.push_back(reflected_book{"1984", "George Orwell", 328, "978-0-452-28423-4"});
+      original.push_back(reflected_animal{"Horse", "Thunder", 500});
+      original.push_back(reflected_vehicle{"Honda", "Accord", 2023, 27000.0});
+      original.push_back(reflected_person{"Frank", 45, 185.0});
+      original.push_back(reflected_book{"To Kill a Mockingbird", "Harper Lee", 281, "978-0-06-112008-4"});
+
+      std::string json;
+      expect(!glz::write_json(original, json));
+
+      std::vector<mixed_variant> decoded;
+      expect(glz::read_json(decoded, json) == glz::error_code::none);
+
+      expect(decoded.size() == original.size());
+
+      for (size_t i = 0; i < original.size(); ++i) {
+         expect(original[i].index() == decoded[i].index());
+      }
+   };
+
+   "prettified json output"_test = [] {
+      using entity_variant = std::variant<reflected_person, reflected_animal>;
+      std::vector<entity_variant> entities;
+
+      entities.push_back(reflected_person{"Grace", 32, 168.0});
+      entities.push_back(reflected_animal{"Bird", "Tweety", 1});
+
+      std::string json;
+      expect(!glz::write<glz::opts{.prettify = true}>(entities, json));
+
+      expect(json.find("\n") != std::string::npos); // Should contain newlines
+      expect(json.find("   ") != std::string::npos); // Should contain indentation
+
+      std::vector<entity_variant> read_entities;
+      expect(glz::read_json(read_entities, json) == glz::error_code::none);
+      expect(read_entities.size() == 2);
+   };
+
+   "vector of variant with structs having overlapping field names"_test = [] {
+      // Both structs have a 'name' field, but different other fields
+      using ambiguous_variant = std::variant<reflected_person, reflected_animal>;
+      std::vector<ambiguous_variant> items;
+
+      // The variant should deduce the correct type based on all fields present
+      items.push_back(reflected_person{"Henry", 50, 175.5});
+      items.push_back(reflected_animal{"Lion", "Simba", 190});
+
+      std::string json;
+      expect(!glz::write_json(items, json));
+
+      std::vector<ambiguous_variant> read_items;
+      expect(glz::read_json(read_items, json) == glz::error_code::none);
+
+      expect(read_items.size() == 2);
+      expect(std::holds_alternative<reflected_person>(read_items[0]));
+      expect(std::holds_alternative<reflected_animal>(read_items[1]));
    };
 };
 
@@ -4233,7 +4466,7 @@ suite json_schema = [] {
       // when you update this string
       expect(
          schema ==
-         R"({"type":["object"],"properties":{"array":{"$ref":"#/$defs/std::array<std::string,4>"},"b":{"$ref":"#/$defs/bool"},"c":{"$ref":"#/$defs/char"},"color":{"$ref":"#/$defs/Color"},"d":{"$ref":"#/$defs/double"},"deque":{"$ref":"#/$defs/std::deque<double>"},"i":{"$ref":"#/$defs/int32_t"},"list":{"$ref":"#/$defs/std::list<int32_t>"},"map":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"mapi":{"$ref":"#/$defs/std::map<int32_t,double>"},"optional":{"$ref":"#/$defs/std::optional<V3>"},"sptr":{"$ref":"#/$defs/std::shared_ptr<sub_thing>"},"thing":{"$ref":"#/$defs/sub_thing"},"thing2array":{"$ref":"#/$defs/std::array<sub_thing2,1>"},"thing_ptr":{"$ref":"#/$defs/sub_thing*"},"v":{"$ref":"#/$defs/std::variant<var1_t,var2_t>"},"vb":{"$ref":"#/$defs/std::vector<bool>"},"vec3":{"$ref":"#/$defs/V3"},"vector":{"$ref":"#/$defs/std::vector<V3>"}},"additionalProperties":false,"$defs":{"Color":{"type":["string"],"oneOf":[{"title":"Red","const":"Red"},{"title":"Green","const":"Green"},{"title":"Blue","const":"Blue"}]},"V3":{"type":["array"]},"bool":{"type":["boolean"]},"char":{"type":["string"]},"double":{"type":["number"],"minimum":-1.7976931348623157E308,"maximum":1.7976931348623157E308},"float":{"type":["number"],"minimum":-3.4028234663852886E38,"maximum":3.4028234663852886E38},"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::array<std::string,4>":{"type":["array"],"items":{"$ref":"#/$defs/std::string"},"minItems":4,"maxItems":4},"std::array<sub_thing2,1>":{"type":["array"],"items":{"$ref":"#/$defs/sub_thing2"},"minItems":1,"maxItems":1},"std::deque<double>":{"type":["array"],"items":{"$ref":"#/$defs/double"}},"std::list<int32_t>":{"type":["array"],"items":{"$ref":"#/$defs/int32_t"}},"std::map<int32_t,double>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/double"}},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::optional<V3>":{"type":["array","null"]},"std::shared_ptr<sub_thing>":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"std::string":{"type":["string"]},"std::variant<var1_t,var2_t>":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"x":{"$ref":"#/$defs/double"}},"additionalProperties":false,"title":"var1_t"},{"type":["object"],"properties":{"y":{"$ref":"#/$defs/double"}},"additionalProperties":false,"title":"var2_t"}]},"std::vector<V3>":{"type":["array"],"items":{"$ref":"#/$defs/V3"}},"std::vector<bool>":{"type":["array"],"items":{"$ref":"#/$defs/bool"}},"sub_thing":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing*":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing2":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"},"c":{"$ref":"#/$defs/double"},"d":{"$ref":"#/$defs/double"},"e":{"$ref":"#/$defs/double"},"f":{"$ref":"#/$defs/float"},"g":{"$ref":"#/$defs/double"},"h":{"$ref":"#/$defs/double"}},"additionalProperties":false}},"examples":[{"thing":{},"i":42}],"required":["thing","i"]})")
+         R"({"type":["object"],"properties":{"array":{"$ref":"#/$defs/std::array<std::string,4>"},"b":{"$ref":"#/$defs/bool"},"c":{"$ref":"#/$defs/char"},"color":{"$ref":"#/$defs/Color"},"d":{"$ref":"#/$defs/double"},"deque":{"$ref":"#/$defs/std::deque<double>"},"i":{"$ref":"#/$defs/int32_t"},"list":{"$ref":"#/$defs/std::list<int32_t>"},"map":{"$ref":"#/$defs/std::map<std::string,int32_t>"},"mapi":{"$ref":"#/$defs/std::map<int32_t,double>"},"optional":{"$ref":"#/$defs/std::optional<V3>"},"sptr":{"$ref":"#/$defs/std::shared_ptr<sub_thing>"},"thing":{"$ref":"#/$defs/sub_thing"},"thing2array":{"$ref":"#/$defs/std::array<sub_thing2,1>"},"thing_ptr":{"$ref":"#/$defs/sub_thing*"},"v":{"$ref":"#/$defs/std::variant<var1_t,var2_t>"},"vb":{"$ref":"#/$defs/std::vector<bool>"},"vec3":{"$ref":"#/$defs/V3"},"vector":{"$ref":"#/$defs/std::vector<V3>"}},"additionalProperties":false,"$defs":{"Color":{"type":["string"],"oneOf":[{"title":"Red","const":"Red"},{"title":"Green","const":"Green"},{"title":"Blue","const":"Blue"}]},"V3":{"type":["array"]},"bool":{"type":["boolean"]},"char":{"type":["string"]},"double":{"type":["number"],"minimum":-1.7976931348623157E308,"maximum":1.7976931348623157E308},"float":{"type":["number"],"minimum":-3.4028234663852886E38,"maximum":3.4028234663852886E38},"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::array<std::string,4>":{"type":["array"],"items":{"$ref":"#/$defs/std::string"},"minItems":4,"maxItems":4},"std::array<sub_thing2,1>":{"type":["array"],"items":{"$ref":"#/$defs/sub_thing2"},"minItems":1,"maxItems":1},"std::deque<double>":{"type":["array"],"items":{"$ref":"#/$defs/double"}},"std::list<int32_t>":{"type":["array"],"items":{"$ref":"#/$defs/int32_t"}},"std::map<int32_t,double>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/double"}},"std::map<std::string,int32_t>":{"type":["object"],"additionalProperties":{"$ref":"#/$defs/int32_t"}},"std::optional<V3>":{"type":["array","null"]},"std::shared_ptr<sub_thing>":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"std::string":{"type":["string"]},"std::variant<var1_t,var2_t>":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"x":{"$ref":"#/$defs/double"}},"additionalProperties":false,"title":"var1_t"},{"type":["object"],"properties":{"y":{"$ref":"#/$defs/double"}},"additionalProperties":false,"title":"var2_t"}]},"std::vector<V3>":{"type":["array"],"items":{"$ref":"#/$defs/V3"}},"std::vector<bool>":{"type":["array"],"items":{"$ref":"#/$defs/bool"}},"sub_thing":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing*":{"type":["object","null"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"}},"additionalProperties":false},"sub_thing2":{"type":["object"],"properties":{"a":{"$ref":"#/$defs/double"},"b":{"$ref":"#/$defs/std::string"},"c":{"$ref":"#/$defs/double"},"d":{"$ref":"#/$defs/double"},"e":{"$ref":"#/$defs/double"},"f":{"$ref":"#/$defs/float"},"g":{"$ref":"#/$defs/double"},"h":{"$ref":"#/$defs/double"}},"additionalProperties":false}},"examples":[{"thing":{},"i":42}],"required":["thing","i"],"title":"Thing"})")
          << schema;
    };
 };
@@ -5842,6 +6075,22 @@ suite required_keys = [] {
                                   ^ hello)")
          << err_msg;
    };
+
+   "required_keys_format_error_issue1866"_test = [] {
+      std::vector<Issue1866> exports;
+      std::vector<Issue1866> gen;
+      std::string buffer{
+         R"([{"uniqueName": "/Lotus/Characters/TwinQueens","name": "Twin Queens","description": "Rulers of the Grineer with their own banner.","codexSecret": false,"parentName": "/Lotus/Characters"}])"};
+
+      std::string buffer1{
+         R"([{"uniqueName": "/Lotus/Characters/TwinQueens","name": "Twin Queens","description": "Rulers of the Grineer with their own banner.","codexSecret": false}])"};
+      auto er = glz::read<glz::opts{.error_on_missing_keys = true}>(exports, buffer);
+      expect(!er);
+
+      auto er1 = glz::read<glz::opts{.error_on_missing_keys = true}>(gen, buffer1);
+      expect(er1);
+      expect(er1.custom_error_message == "parentName");
+   };
 };
 
 struct numbers_as_strings
@@ -7148,7 +7397,7 @@ suite empty_variant_objects = [] {
       const auto s = glz::write_json_schema<var_schema>().value_or("error");
       expect(
          s ==
-         R"({"type":["object"],"properties":{"$schema":{"$ref":"#/$defs/std::string"},"variant":{"$ref":"#/$defs/vari"}},"additionalProperties":false,"$defs":{"std::string":{"type":["string"]},"vari":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"type":{"const":"varx"}},"additionalProperties":false,"required":["type"],"title":"varx"},{"type":["object"],"properties":{"type":{"const":"vary"}},"additionalProperties":false,"required":["type"],"title":"vary"}]}}})")
+         R"({"type":["object"],"properties":{"$schema":{"$ref":"#/$defs/std::string"},"variant":{"$ref":"#/$defs/vari"}},"additionalProperties":false,"$defs":{"std::string":{"type":["string"]},"vari":{"type":["object"],"oneOf":[{"type":["object"],"properties":{"type":{"const":"varx"}},"additionalProperties":false,"required":["type"],"title":"varx"},{"type":["object"],"properties":{"type":{"const":"vary"}},"additionalProperties":false,"required":["type"],"title":"vary"}]}},"title":"var_schema"})")
          << s;
    };
 };
@@ -8416,7 +8665,7 @@ suite meta_schema_tests = [] {
       const auto json_schema = glz::write_json_schema<meta_schema_t>().value_or("error");
       expect(
          json_schema ==
-         R"({"type":["object"],"properties":{"file_name":{"$ref":"#/$defs/std::string","description":"provide a file name to load"},"is_valid":{"$ref":"#/$defs/bool","description":"for validation"},"x":{"$ref":"#/$defs/int32_t","description":"x is a special integer"}},"additionalProperties":false,"$defs":{"bool":{"type":["boolean"]},"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::string":{"type":["string"]}}})")
+         R"({"type":["object"],"properties":{"file_name":{"$ref":"#/$defs/std::string","description":"provide a file name to load"},"is_valid":{"$ref":"#/$defs/bool","description":"for validation"},"x":{"$ref":"#/$defs/int32_t","description":"x is a special integer"}},"additionalProperties":false,"$defs":{"bool":{"type":["boolean"]},"int32_t":{"type":["integer"],"minimum":-2147483648,"maximum":2147483647},"std::string":{"type":["string"]}},"title":"meta_schema_t"})")
          << json_schema;
    };
 
@@ -8465,7 +8714,8 @@ suite meta_schema_tests = [] {
             "string"
          ]
       }
-   }
+   },
+   "title": "meta_schema_t"
 })") << json_schema;
    };
 };
@@ -10736,6 +10986,19 @@ struct glz::meta<cast_obj>
                                         "indirect", cast<[](T& s) -> auto& { return s.integer; }, double>);
 };
 
+struct cast_nullable_obj
+{
+   std::optional<int> a;
+   std::string b;
+};
+
+template <>
+struct glz::meta<cast_nullable_obj>
+{
+   using T = cast_nullable_obj;
+   static constexpr auto value = object("a", cast<&T::a, std::optional<double>>, "b", &T::b);
+};
+
 suite cast_tests = [] {
    "cast"_test = [] {
       cast_obj obj{};
@@ -10756,6 +11019,35 @@ suite cast_tests = [] {
       obj.integer = 77;
       expect(not glz::write_json(obj, buffer));
       expect(buffer == R"({"integer":77,"indirect":77})");
+   };
+
+   "cast nullable with error_on_missing_keys"_test = [] {
+      constexpr auto opts = glz::opts{
+         .format = glz::JSON,
+         .skip_null_members = true,
+         .error_on_missing_keys = true,
+      };
+
+      std::string_view data = R"({"b":"hello"})";
+      cast_nullable_obj obj{};
+
+      auto ec = glz::read<opts>(obj, data);
+      expect(!ec) << glz::format_error(ec, data);
+      expect(!obj.a.has_value());
+      expect(obj.b == "hello");
+
+      // Test with value present
+      data = R"({"a":42.5,"b":"world"})";
+      ec = glz::read<opts>(obj, data);
+      expect(!ec) << glz::format_error(ec, data);
+      expect(obj.a.has_value());
+      expect(obj.a.value() == 42);
+      expect(obj.b == "world");
+
+      // Test missing required field
+      data = R"({"a":null})";
+      ec = glz::read<opts>(obj, data);
+      expect(ec == glz::error_code::missing_key);
    };
 };
 
