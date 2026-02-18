@@ -63,6 +63,11 @@ namespace glz
 
    template <class Buffer>
    concept non_const_buffer = !std::is_const_v<Buffer>;
+
+   template <class T>
+   concept byte_like =
+      std::same_as<std::remove_cvref_t<T>, std::byte> || std::same_as<std::remove_cvref_t<T>, unsigned char> ||
+      std::same_as<std::remove_cvref_t<T>, std::uint8_t>;
 }
 
 namespace glz
@@ -120,6 +125,33 @@ namespace glz
       { pair.first };
       { pair.second };
    };
+
+   // glz::pair - a simple pair type for use in glaze
+   template <class T1, class T2>
+   struct pair
+   {
+      using first_type = T1;
+      using second_type = T2;
+      T1 first{};
+      T2 second{};
+   };
+
+   template <class T1, class T2>
+   pair(T1, T2) -> pair<T1, T2>;
+
+   template <size_t I, pair_t T>
+   constexpr decltype(auto) get(T&& p) noexcept
+   {
+      if constexpr (I == 0) {
+         return p.first;
+      }
+      else if constexpr (I == 1) {
+         return p.second;
+      }
+      else {
+         static_assert(I < 2, "Invalid index for pair::get");
+      }
+   }
 
    template <class T>
    concept emplaceable = requires(T container) {
@@ -278,6 +310,9 @@ namespace glz
    template <class Buffer>
    concept output_buffer = range<Buffer> && (sizeof(range_value_t<Buffer>) == sizeof(char)) &&
                            non_const_buffer<Buffer> && safe_resizable_buffer<Buffer>;
+
+   template <class Range>
+   concept contiguous_byte_range = contiguous<Range> && byte_like<range_value_t<Range>>;
 
    template <class T>
    constexpr bool const_value_v = std::is_const_v<std::remove_pointer_t<std::remove_reference_t<T>>>;

@@ -9,6 +9,7 @@
 #include <variant>
 
 #include "glaze/core/chrono.hpp"
+#include "glaze/util/parse.hpp"
 
 #if !defined(GLZ_DISABLE_SIMD) && (defined(__x86_64__) || defined(_M_X64))
 #if defined(_MSC_VER)
@@ -202,6 +203,248 @@ namespace glz
                   write_object_entry_separator<Opts>(ctx, b, ix);
                }
             });
+         }
+
+         if (not bool(ctx.error)) [[likely]] {
+            dump<'}'>(b, ix);
+         }
+      }
+   };
+
+   // Runtime partial write - writes only the keys specified at runtime
+   // Outputs keys in the order they appear in the input container
+   template <class T>
+      requires(glaze_object_t<T> || reflectable<T>)
+   struct to_runtime_partial
+   {
+      template <auto Opts, class Keys, class Value, is_context Ctx, class B, class IX>
+      static void op(const Keys& keys, Value&& value, Ctx&& ctx, B&& b, IX&& ix)
+      {
+         if constexpr (!check_opening_handled(Opts)) {
+            dump<'{'>(b, ix);
+            if constexpr (Opts.prettify) {
+               ctx.indentation_level += Opts.indentation_width;
+               dump<'\n'>(b, ix);
+               dumpn<Opts.indentation_char>(ctx.indentation_level, b, ix);
+            }
+         }
+
+         using V = std::remove_cvref_t<Value>;
+         static constexpr auto N = reflect<V>::size;
+
+         if constexpr (N == 0) {
+            // Empty struct - any key is unknown
+            for (const auto& key_ref : keys) {
+               (void)key_ref;
+               ctx.error = error_code::unknown_key;
+               return;
+            }
+         }
+         else {
+            static constexpr auto& HashInfo = hash_info<V>;
+
+            decltype(auto) t = [&]() -> decltype(auto) {
+               if constexpr (reflectable<V>) {
+                  return to_tie(value);
+               }
+               else {
+                  return nullptr;
+               }
+            }();
+
+            bool first = true;
+
+            for (const auto& key_ref : keys) {
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
+
+               const sv key{key_ref};
+
+               // Use hash-based lookup to find the member index
+               const auto index = decode_hash_with_size<JSON, V, HashInfo, HashInfo.type>::op(
+                  key.data(), key.data() + key.size(), key.size());
+
+               if (index >= N) {
+                  ctx.error = error_code::unknown_key;
+                  return;
+               }
+
+               // Verify the key matches (hash collision check)
+               const sv actual_key = reflect<V>::keys[index];
+               if (key != actual_key) {
+                  ctx.error = error_code::unknown_key;
+                  return;
+               }
+
+               // Write separator if not first
+               if (first) {
+                  first = false;
+               }
+               else {
+                  write_object_entry_separator<Opts>(ctx, b, ix);
+               }
+
+               // Write the quoted key at runtime
+               if constexpr (vector_like<B>) {
+                  const auto k = ix + key.size() + 4 + (Opts.prettify ? 1 : 0);
+                  if (k > b.size()) [[unlikely]] {
+                     b.resize(2 * k);
+                  }
+               }
+               dump<'"'>(b, ix);
+               dump(key, b, ix);
+               if constexpr (Opts.prettify) {
+                  dump<"\": ">(b, ix);
+               }
+               else {
+                  dump<"\":">(b, ix);
+               }
+
+               // Use visit to dispatch to correct member and serialize value
+               visit<N>(
+                  [&]<size_t I>() {
+                     using val_t = field_t<V, I>;
+                     if constexpr (reflectable<V>) {
+                        to<JSON, val_t>::template op<Opts>(get_member(value, get<I>(t)), ctx, b, ix);
+                     }
+                     else {
+                        to<JSON, val_t>::template op<Opts>(get_member(value, get<I>(reflect<V>::values)), ctx, b, ix);
+                     }
+                  },
+                  index);
+            }
+         }
+
+         if constexpr (Opts.prettify) {
+            ctx.indentation_level -= Opts.indentation_width;
+            dump<'\n'>(b, ix);
+            dumpn<Opts.indentation_char>(ctx.indentation_level, b, ix);
+         }
+
+         if (not bool(ctx.error)) [[likely]] {
+            dump<'}'>(b, ix);
+         }
+      }
+   };
+
+   // Runtime exclude write - writes all keys EXCEPT those specified at runtime
+   // Outputs keys in struct definition order, skipping excluded keys
+   template <class T>
+      requires(glaze_object_t<T> || reflectable<T>)
+   struct to_runtime_exclude
+   {
+      template <auto Opts, class Keys, class Value, is_context Ctx, class B, class IX>
+      static void op(const Keys& exclude_keys, Value&& value, Ctx&& ctx, B&& b, IX&& ix)
+      {
+         if constexpr (!check_opening_handled(Opts)) {
+            dump<'{'>(b, ix);
+            if constexpr (Opts.prettify) {
+               ctx.indentation_level += Opts.indentation_width;
+               dump<'\n'>(b, ix);
+               dumpn<Opts.indentation_char>(ctx.indentation_level, b, ix);
+            }
+         }
+
+         using V = std::remove_cvref_t<Value>;
+         static constexpr auto N = reflect<V>::size;
+
+         if constexpr (N == 0) {
+            // Empty struct - any exclude key is unknown
+            for (const auto& key_ref : exclude_keys) {
+               (void)key_ref;
+               ctx.error = error_code::unknown_key;
+               return;
+            }
+         }
+         else {
+            static constexpr auto& HashInfo = hash_info<V>;
+
+            // First, validate all exclude keys exist and build a bitset of excluded indices
+            std::array<bool, N> excluded{};
+            for (const auto& key_ref : exclude_keys) {
+               const sv key{key_ref};
+
+               // Use hash-based lookup to find the member index
+               const auto index = decode_hash_with_size<JSON, V, HashInfo, HashInfo.type>::op(
+                  key.data(), key.data() + key.size(), key.size());
+
+               if (index >= N) {
+                  ctx.error = error_code::unknown_key;
+                  return;
+               }
+
+               // Verify the key matches (hash collision check)
+               const sv actual_key = reflect<V>::keys[index];
+               if (key != actual_key) {
+                  ctx.error = error_code::unknown_key;
+                  return;
+               }
+
+               excluded[index] = true;
+            }
+
+            decltype(auto) t = [&]() -> decltype(auto) {
+               if constexpr (reflectable<V>) {
+                  return to_tie(value);
+               }
+               else {
+                  return nullptr;
+               }
+            }();
+
+            bool first = true;
+
+            // Iterate over all keys in struct order, skipping excluded ones
+            for_each<N>([&]<size_t I>() {
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
+
+               if (excluded[I]) {
+                  return; // Skip this key
+               }
+
+               // Write separator if not first
+               if (first) {
+                  first = false;
+               }
+               else {
+                  write_object_entry_separator<Opts>(ctx, b, ix);
+               }
+
+               // Write the quoted key
+               static constexpr sv key = reflect<V>::keys[I];
+               if constexpr (vector_like<B>) {
+                  const auto k = ix + key.size() + 4 + (Opts.prettify ? 1 : 0);
+                  if (k > b.size()) [[unlikely]] {
+                     b.resize(2 * k);
+                  }
+               }
+               dump<'"'>(b, ix);
+               dump<key>(b, ix);
+               if constexpr (Opts.prettify) {
+                  dump<"\": ">(b, ix);
+               }
+               else {
+                  dump<"\":">(b, ix);
+               }
+
+               // Serialize the value
+               using val_t = field_t<V, I>;
+               if constexpr (reflectable<V>) {
+                  to<JSON, val_t>::template op<Opts>(get_member(value, get<I>(t)), ctx, b, ix);
+               }
+               else {
+                  to<JSON, val_t>::template op<Opts>(get_member(value, get<I>(reflect<V>::values)), ctx, b, ix);
+               }
+            });
+         }
+
+         if constexpr (Opts.prettify) {
+            ctx.indentation_level -= Opts.indentation_width;
+            dump<'\n'>(b, ix);
+            dumpn<Opts.indentation_char>(ctx.indentation_level, b, ix);
          }
 
          if (not bool(ctx.error)) [[likely]] {
@@ -560,15 +803,19 @@ namespace glz
                }
                // now we don't have to check writing
 
-               std::memcpy(&b[ix], "\"", 1);
-               ++ix;
+               if constexpr (not Opts.raw) {
+                  std::memcpy(&b[ix], "\"", 1);
+                  ++ix;
+               }
                if (str.size()) [[likely]] {
                   const auto n = str.size();
                   std::memcpy(&b[ix], str.data(), n);
                   ix += n;
                }
-               std::memcpy(&b[ix], "\"", 1);
-               ++ix;
+               if constexpr (not Opts.raw) {
+                  std::memcpy(&b[ix], "\"", 1);
+                  ++ix;
+               }
             }
             else {
                const sv str = [&]() -> const sv {
@@ -697,6 +944,9 @@ namespace glz
                         std::memcpy(data, c, 8);
                         uint64_t swar;
                         std::memcpy(&swar, c, 8);
+                        if constexpr (std::endian::native == std::endian::big) {
+                           swar = std::byteswap(swar);
+                        }
 
                         constexpr uint64_t lo7_mask = repeat_byte8(0b01111111);
                         const uint64_t lo7 = swar & lo7_mask;
@@ -783,13 +1033,8 @@ namespace glz
       template <auto Opts, class... Args>
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, Args&&... args)
       {
-         // TODO: Use new hashing approach for better performance
-         // TODO: Check if sequenced and use the value as the index if so
-         using key_t = std::underlying_type_t<T>;
-         static constexpr auto frozen_map = make_enum_to_string_map<T>();
-         const auto& member_it = frozen_map.find(static_cast<key_t>(value));
-         if (member_it != frozen_map.end()) {
-            const sv str = {member_it->second.data(), member_it->second.size()};
+         const sv str = get_enum_name(value);
+         if (!str.empty()) {
             // TODO: Assumes people dont use strings with chars that need to be escaped for their enum names
             // TODO: Could create a pre quoted map for better performance
             if constexpr (not Opts.raw) {
@@ -801,7 +1046,7 @@ namespace glz
             }
          }
          else [[unlikely]] {
-            // What do we want to happen if the value doesn't have a mapped string
+            // Value doesn't have a mapped string, serialize as underlying number
             serialize<JSON>::op<Opts>(static_cast<std::underlying_type_t<T>>(value), ctx, std::forward<Args>(args)...);
          }
       }
@@ -1345,8 +1590,14 @@ namespace glz
                b.resize(2 * k);
             }
          }
-         static constexpr uint32_t null_v = 1819047278;
-         std::memcpy(&b[ix], &null_v, 4);
+         if constexpr (std::endian::native == std::endian::big) {
+            static constexpr char null_v[] = "null";
+            std::memcpy(&b[ix], null_v, 4);
+         }
+         else {
+            static constexpr uint32_t null_v = 1819047278;
+            std::memcpy(&b[ix], &null_v, 4);
+         }
          ix += 4;
       }
    };
@@ -2096,7 +2347,9 @@ namespace glz
             ix += N;
          };
 
-         b[ix++] = '"';
+         if constexpr (not Opts.raw) {
+            b[ix++] = '"';
+         }
          write_digits.template operator()<4>(static_cast<uint64_t>(yr));
          b[ix++] = '-';
          write_digits.template operator()<2>(mo);
@@ -2125,7 +2378,9 @@ namespace glz
          }
 
          b[ix++] = 'Z';
-         b[ix++] = '"';
+         if constexpr (not Opts.raw) {
+            b[ix++] = '"';
+         }
       }
    };
 
@@ -2202,6 +2457,107 @@ namespace glz
    [[nodiscard]] glz::expected<size_t, error_ctx> write_json(T&& value, Buffer&& buffer)
    {
       return write<Partial, opts{}>(std::forward<T>(value), std::forward<Buffer>(buffer));
+   }
+
+   // Runtime partial write - writes only the keys specified at runtime
+   // Keys is a range of string-like types (e.g., std::vector<std::string>, std::array<std::string_view, N>)
+   // Output key order matches the order in the input container
+   // Returns error_code::unknown_key if any key doesn't exist in the struct
+
+   template <auto Opts = opts{}, class T, class Keys, output_buffer Buffer>
+      requires((glaze_object_t<T> || reflectable<T>) && range<Keys>)
+   [[nodiscard]] error_ctx write_json_partial(T&& value, const Keys& keys, Buffer&& buffer)
+   {
+      if constexpr (resizable<Buffer>) {
+         if (buffer.size() < 2 * write_padding_bytes) {
+            buffer.resize(2 * write_padding_bytes);
+         }
+      }
+      context ctx{};
+      size_t ix = 0;
+      to_runtime_partial<std::remove_cvref_t<T>>::template op<set_json<Opts>()>(keys, std::forward<T>(value), ctx,
+                                                                                buffer, ix);
+      if constexpr (resizable<Buffer>) {
+         buffer.resize(ix);
+      }
+      return {ctx.error, ctx.custom_error_message};
+   }
+
+   template <auto Opts = opts{}, class T, class Keys, raw_buffer Buffer>
+      requires((glaze_object_t<T> || reflectable<T>) && range<Keys>)
+   [[nodiscard]] glz::expected<size_t, error_ctx> write_json_partial(T&& value, const Keys& keys, Buffer&& buffer)
+   {
+      context ctx{};
+      size_t ix = 0;
+      to_runtime_partial<std::remove_cvref_t<T>>::template op<set_json<Opts>()>(keys, std::forward<T>(value), ctx,
+                                                                                buffer, ix);
+      if (bool(ctx.error)) [[unlikely]] {
+         return glz::unexpected(error_ctx{ctx.error, ctx.custom_error_message});
+      }
+      return {ix};
+   }
+
+   template <auto Opts = opts{}, class T, class Keys>
+      requires((glaze_object_t<T> || reflectable<T>) && range<Keys>)
+   [[nodiscard]] glz::expected<std::string, error_ctx> write_json_partial(T&& value, const Keys& keys)
+   {
+      std::string buffer{};
+      const auto ec = write_json_partial<Opts>(std::forward<T>(value), keys, buffer);
+      if (bool(ec)) [[unlikely]] {
+         return glz::unexpected(ec);
+      }
+      return {std::move(buffer)};
+   }
+
+   // Runtime exclude write - writes all keys EXCEPT those specified at runtime
+   // Keys is a range of string-like types (e.g., std::vector<std::string>, std::array<std::string_view, N>)
+   // Output key order matches the struct definition order
+   // Returns error_code::unknown_key if any exclude key doesn't exist in the struct
+
+   template <auto Opts = opts{}, class T, class Keys, output_buffer Buffer>
+      requires((glaze_object_t<T> || reflectable<T>) && range<Keys>)
+   [[nodiscard]] error_ctx write_json_exclude(T&& value, const Keys& exclude_keys, Buffer&& buffer)
+   {
+      if constexpr (resizable<Buffer>) {
+         if (buffer.size() < 2 * write_padding_bytes) {
+            buffer.resize(2 * write_padding_bytes);
+         }
+      }
+      context ctx{};
+      size_t ix = 0;
+      to_runtime_exclude<std::remove_cvref_t<T>>::template op<set_json<Opts>()>(exclude_keys, std::forward<T>(value),
+                                                                                ctx, buffer, ix);
+      if constexpr (resizable<Buffer>) {
+         buffer.resize(ix);
+      }
+      return {ctx.error, ctx.custom_error_message};
+   }
+
+   template <auto Opts = opts{}, class T, class Keys, raw_buffer Buffer>
+      requires((glaze_object_t<T> || reflectable<T>) && range<Keys>)
+   [[nodiscard]] glz::expected<size_t, error_ctx> write_json_exclude(T&& value, const Keys& exclude_keys,
+                                                                     Buffer&& buffer)
+   {
+      context ctx{};
+      size_t ix = 0;
+      to_runtime_exclude<std::remove_cvref_t<T>>::template op<set_json<Opts>()>(exclude_keys, std::forward<T>(value),
+                                                                                ctx, buffer, ix);
+      if (bool(ctx.error)) [[unlikely]] {
+         return glz::unexpected(error_ctx{ctx.error, ctx.custom_error_message});
+      }
+      return {ix};
+   }
+
+   template <auto Opts = opts{}, class T, class Keys>
+      requires((glaze_object_t<T> || reflectable<T>) && range<Keys>)
+   [[nodiscard]] glz::expected<std::string, error_ctx> write_json_exclude(T&& value, const Keys& exclude_keys)
+   {
+      std::string buffer{};
+      const auto ec = write_json_exclude<Opts>(std::forward<T>(value), exclude_keys, buffer);
+      if (bool(ec)) [[unlikely]] {
+         return glz::unexpected(ec);
+      }
+      return {std::move(buffer)};
    }
 
    template <write_supported<JSON> T, class Buffer>

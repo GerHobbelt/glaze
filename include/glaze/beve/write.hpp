@@ -40,20 +40,42 @@ namespace glz
    {
       using V = std::decay_t<decltype(value)>;
       constexpr auto n = sizeof(V);
-      if (const auto k = ix + n; k > b.size()) [[unlikely]] {
-         b.resize(2 * k);
-      }
 
-      constexpr auto is_volatile = std::is_volatile_v<std::remove_reference_t<decltype(value)>>;
-
-      if constexpr (is_volatile) {
-         const V temp = value;
-         std::memcpy(&b[ix], &temp, n);
+      if constexpr (n == 1) {
+         // Optimized single-byte path: direct assignment instead of memcpy
+         if (ix == b.size()) [[unlikely]] {
+            b.resize(b.size() == 0 ? 128 : b.size() * 2);
+         }
+         b[ix] = static_cast<std::decay_t<decltype(b[0])>>(value);
+         ++ix;
       }
       else {
-         std::memcpy(&b[ix], &value, n);
+         if (const auto k = ix + n; k > b.size()) [[unlikely]] {
+            b.resize(2 * k);
+         }
+
+         constexpr auto is_volatile = std::is_volatile_v<std::remove_reference_t<decltype(value)>>;
+
+         if constexpr (is_volatile) {
+            V temp = value;
+            if constexpr (std::endian::native == std::endian::big) {
+               byteswap_le(temp);
+            }
+            std::memcpy(&b[ix], &temp, n);
+         }
+         else {
+            if constexpr (std::endian::native == std::endian::big &&
+                          (std::integral<V> || std::floating_point<V> || std::is_enum_v<V>)) {
+               V temp = value;
+               byteswap_le(temp);
+               std::memcpy(&b[ix], &temp, n);
+            }
+            else {
+               std::memcpy(&b[ix], &value, n);
+            }
+         }
+         ix += n;
       }
-      ix += n;
    }
 
    template <uint64_t i, class... Args>
@@ -529,10 +551,11 @@ namespace glz
 
             // booleans must be dumped using single bits
             if constexpr (has_static_size<T>) {
-               constexpr auto num_bytes = (value.size() + 7) / 8;
+               constexpr auto N = std::tuple_size_v<std::decay_t<T>>;
+               constexpr auto num_bytes = (N + 7) / 8;
                std::array<uint8_t, num_bytes> bytes{};
                for (size_t byte_i{}, i{}; byte_i < num_bytes; ++byte_i) {
-                  for (size_t bit_i = 7; bit_i < 8 && i < value.size(); --bit_i, ++i) {
+                  for (size_t bit_i = 7; bit_i < 8 && i < N; --bit_i, ++i) {
                      bytes[byte_i] |= uint8_t(value[i]) << uint8_t(bit_i);
                   }
                }
@@ -569,15 +592,28 @@ namespace glz
                   }
 
                   if constexpr (is_volatile) {
-                     V temp;
                      const auto n_elements = value.size();
                      for (size_t i = 0; i < n_elements; ++i) {
-                        temp = value[i];
+                        V temp = value[i];
+                        if constexpr (std::endian::native == std::endian::big) {
+                           byteswap_le(temp);
+                        }
+                        std::memcpy(&b[ix], &temp, sizeof(V));
+                        ix += sizeof(V);
+                     }
+                  }
+                  else if constexpr (std::endian::native == std::endian::big && sizeof(V) > 1) {
+                     // On big endian, swap each element
+                     const auto n_elements = static_cast<size_t>(value.size());
+                     for (size_t i = 0; i < n_elements; ++i) {
+                        V temp = value[i];
+                        byteswap_le(temp);
                         std::memcpy(&b[ix], &temp, sizeof(V));
                         ix += sizeof(V);
                      }
                   }
                   else {
+                     // Little endian or single-byte: bulk memcpy
                      if (n) {
                         std::memcpy(&b[ix], value.data(), n);
                         ix += n;
@@ -636,9 +672,25 @@ namespace glz
                   b.resize(2 * k);
                }
 
-               if (n) {
-                  std::memcpy(&b[ix], value.data(), n);
-                  ix += n;
+               if constexpr (std::endian::native == std::endian::big) {
+                  // On big endian, swap each component
+                  for (auto&& x : value) {
+                     X real_val = x.real();
+                     X imag_val = x.imag();
+                     byteswap_le(real_val);
+                     byteswap_le(imag_val);
+                     std::memcpy(&b[ix], &real_val, sizeof(X));
+                     ix += sizeof(X);
+                     std::memcpy(&b[ix], &imag_val, sizeof(X));
+                     ix += sizeof(X);
+                  }
+               }
+               else {
+                  // Little endian: bulk memcpy
+                  if (n) {
+                     std::memcpy(&b[ix], value.data(), n);
+                     ix += n;
+                  }
                }
             }
             else {
@@ -1165,5 +1217,111 @@ namespace glz
    [[nodiscard]] error_ctx write_file_beve_untagged(T&& value, const std::string& file_name, auto&& buffer)
    {
       return write_file_beve<opt_true<Opts, &opts::structs_as_arrays>>(std::forward<T>(value), file_name, buffer);
+   }
+
+   // ===== Delimited BEVE support for multiple objects in one buffer =====
+
+   // Write the BEVE delimiter byte to a buffer
+   // Used to separate multiple BEVE values in a stream/buffer (like NDJSON's newline)
+   template <class Buffer>
+   void write_beve_delimiter(Buffer& buffer)
+   {
+      buffer.push_back(static_cast<typename Buffer::value_type>(tag::delimiter));
+   }
+
+   // Append a BEVE value to an existing buffer without clearing it
+   // Returns the number of bytes written via the expected value
+   template <auto Opts = opts{}, write_supported<BEVE> T, class Buffer>
+      requires output_buffer<Buffer>
+   [[nodiscard]] glz::expected<size_t, error_ctx> write_beve_append(T&& value, Buffer& buffer)
+   {
+      const size_t start_ix = buffer.size();
+
+      if constexpr (resizable<Buffer>) {
+         if (buffer.size() < start_ix + 2 * write_padding_bytes) {
+            buffer.resize(start_ix + 2 * write_padding_bytes);
+         }
+      }
+
+      context ctx{};
+      size_t ix = start_ix;
+      to<BEVE, std::remove_cvref_t<T>>::template op<set_beve<Opts>()>(std::forward<T>(value), ctx, buffer, ix);
+
+      if constexpr (resizable<Buffer>) {
+         buffer.resize(ix);
+      }
+
+      if (bool(ctx.error)) [[unlikely]] {
+         return glz::unexpected(error_ctx{ctx.error, ctx.custom_error_message});
+      }
+
+      return ix - start_ix; // bytes written
+   }
+
+   // Append a BEVE value to an existing buffer with a delimiter prefix
+   // Useful for streaming multiple values
+   template <auto Opts = opts{}, write_supported<BEVE> T, class Buffer>
+      requires output_buffer<Buffer>
+   [[nodiscard]] glz::expected<size_t, error_ctx> write_beve_append_with_delimiter(T&& value, Buffer& buffer)
+   {
+      write_beve_delimiter(buffer);
+      auto result = write_beve_append<Opts>(std::forward<T>(value), buffer);
+      if (result) {
+         return *result + 1; // +1 for delimiter
+      }
+      return result;
+   }
+
+   // Write multiple BEVE values to a buffer with delimiters between them
+   template <auto Opts = opts{}, class Container, class Buffer>
+      requires output_buffer<Buffer> && readable_array_t<Container>
+   [[nodiscard]] error_ctx write_beve_delimited(const Container& values, Buffer& buffer)
+   {
+      context ctx{};
+
+      if constexpr (resizable<Buffer>) {
+         if (buffer.size() < 2 * write_padding_bytes) {
+            buffer.resize(2 * write_padding_bytes);
+         }
+      }
+
+      size_t ix = 0;
+      bool first = true;
+
+      for (const auto& value : values) {
+         if (!first) {
+            // Write delimiter between values
+            dump_type(tag::delimiter, buffer, ix);
+         }
+         first = false;
+
+         to<BEVE, std::remove_cvref_t<decltype(value)>>::template op<set_beve<Opts>()>(value, ctx, buffer, ix);
+
+         if (bool(ctx.error)) [[unlikely]] {
+            if constexpr (resizable<Buffer>) {
+               buffer.resize(ix);
+            }
+            return {ctx.error, ctx.custom_error_message};
+         }
+      }
+
+      if constexpr (resizable<Buffer>) {
+         buffer.resize(ix);
+      }
+
+      return {};
+   }
+
+   // Write multiple BEVE values to a buffer with delimiters, returning the buffer
+   template <auto Opts = opts{}, class Container>
+      requires readable_array_t<Container>
+   [[nodiscard]] glz::expected<std::string, error_ctx> write_beve_delimited(const Container& values)
+   {
+      std::string buffer{};
+      const auto ec = write_beve_delimited<Opts>(values, buffer);
+      if (bool(ec)) [[unlikely]] {
+         return glz::unexpected(ec);
+      }
+      return buffer;
    }
 }

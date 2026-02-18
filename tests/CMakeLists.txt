@@ -3,7 +3,7 @@ include(FetchContent)
 FetchContent_Declare(
   ut
   GIT_REPOSITORY https://github.com/openalgz/ut
-  GIT_TAG v1.0.0
+  GIT_TAG v1.1.0
   GIT_SHALLOW TRUE
 )
 
@@ -113,6 +113,7 @@ endif()
 
 add_subdirectory(api_test)
 add_subdirectory(beve_test)
+add_subdirectory(cbor_test)
 add_subdirectory(buffer_pool_test)
 add_subdirectory(cli_menu_test)
 add_subdirectory(compare_test)
@@ -121,7 +122,10 @@ add_subdirectory(eigen_test)
 add_subdirectory(example_json)
 add_subdirectory(exceptions_test)
 add_subdirectory(inplace_vector)
-add_subdirectory(int_parsing)
+option(glaze_BUILD_PERFORMANCE_TESTS "Build performance tests" ON)
+if(glaze_BUILD_PERFORMANCE_TESTS)
+    add_subdirectory(int_parsing)
+endif()
 add_subdirectory(jmespath)
 add_subdirectory(jsonrpc_test)
 add_subdirectory(key_transformers_test)
@@ -133,15 +137,21 @@ add_subdirectory(stencil)
 add_subdirectory(threading_test)
 add_subdirectory(toml_test)
 add_subdirectory(utility_formats)
+add_subdirectory(msgpack_test)
 
 # JSON Tests
 add_subdirectory(chrono_test)
 add_subdirectory(json_conformance)
-add_subdirectory(json_performance)
+if(glaze_BUILD_PERFORMANCE_TESTS)
+    add_subdirectory(json_performance)
+endif()
 add_subdirectory(json_reflection_test)
 add_subdirectory(json_test)
 
-add_subdirectory(networking_tests)
+option(glaze_BUILD_NETWORKING_TESTS "Build networking tests (requires OpenSSL)" ON)
+if(glaze_BUILD_NETWORKING_TESTS)
+    add_subdirectory(networking_tests)
+endif()
 
 if(glaze_EETF_FORMAT)
     add_subdirectory(eetf_test)

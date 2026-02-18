@@ -30,7 +30,6 @@ namespace glz
       using connection_variant = std::variant<std::monostate, std::shared_ptr<websocket_connection<tcp_socket>>>;
 #endif
 
-     private:
       // Internal implementation - prevent callbacks from firing after client destruction
       // by using weak_from_this() pattern
       struct impl : std::enable_shared_from_this<impl>
@@ -54,6 +53,9 @@ namespace glz
 #endif
 
          size_t max_message_size{1024 * 1024 * 16}; // 16 MB limit
+#ifdef GLZ_ENABLE_SSL
+         asio::ssl::verify_mode ssl_verify_mode_{asio::ssl::verify_peer}; // Default to verify peer
+#endif
 
          explicit impl(std::shared_ptr<asio::io_context> context) : ctx(std::move(context)) {}
 
@@ -97,7 +99,18 @@ namespace glz
          asio::ip::tcp::socket& get_tcp_socket_ref()
          {
 #ifdef GLZ_ENABLE_SSL
-            if (ssl_socket_) return ssl_socket_->lowest_layer();
+            // Use next_layer() instead of lowest_layer() to get the correct type.
+            // In ASIO 1.32+, lowest_layer() returns basic_socket<tcp> which differs
+            // from basic_stream_socket<tcp> (the actual socket type).
+            if (ssl_socket_) return ssl_socket_->next_layer();
+#endif
+            return *tcp_socket_;
+         }
+
+         const asio::ip::tcp::socket& get_tcp_socket_ref() const
+         {
+#ifdef GLZ_ENABLE_SSL
+            if (ssl_socket_) return ssl_socket_->next_layer();
 #endif
             return *tcp_socket_;
          }
@@ -117,6 +130,7 @@ namespace glz
                if (!ssl_ctx_) {
                   ssl_ctx_ = std::make_shared<asio::ssl::context>(asio::ssl::context::tlsv12_client);
                   ssl_ctx_->set_default_verify_paths();
+                  ssl_ctx_->set_verify_mode(ssl_verify_mode_);
                }
                ssl_socket_ = std::make_shared<asio::ssl::stream<asio::ip::tcp::socket>>(*ctx, *ssl_ctx_);
 
@@ -356,6 +370,7 @@ namespace glz
          }
       };
 
+     private:
       std::shared_ptr<impl> impl_;
 
      public:
@@ -393,7 +408,17 @@ namespace glz
 
       void set_max_message_size(size_t size) { impl_->max_message_size = size; }
 
+#ifdef GLZ_ENABLE_SSL
+      // Set SSL verification mode before calling connect()
+      // Use asio::ssl::verify_none to disable certificate verification
+      // (useful for self-signed certificates in testing)
+      void set_ssl_verify_mode(asio::ssl::verify_mode mode) { impl_->ssl_verify_mode_ = mode; }
+#endif
+
       std::shared_ptr<asio::io_context>& context() { return impl_->ctx; }
+
+      asio::ip::tcp::socket& socket() { return impl_->get_tcp_socket_ref(); }
+      const asio::ip::tcp::socket& socket() const { return impl_->get_tcp_socket_ref(); }
 
       void run() { impl_->ctx->run(); }
 
@@ -404,5 +429,8 @@ namespace glz
       void send_binary(std::string_view msg) { impl_->send_binary(msg); }
 
       void close() { impl_->close_connection(); }
+
+      impl& internal() { return *impl_; }
+      const impl& internal() const { return *impl_; }
    };
 }

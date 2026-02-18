@@ -81,8 +81,7 @@ namespace glz
       {
          using V = std::decay_t<decltype(get_member(std::declval<Value>(), meta_wrapper_v<T>))>;
          from<BEVE, V>::template op<Opts>(get_member(std::forward<Value>(value), meta_wrapper_v<T>),
-                                          std::forward<Tag>(tag), std::forward<Ctx>(ctx), std::forward<It0>(it),
-                                          end);
+                                          std::forward<Tag>(tag), std::forward<Ctx>(ctx), std::forward<It0>(it), end);
       }
    };
 
@@ -219,7 +218,11 @@ namespace glz
                         ctx.error = error_code::unexpected_end;
                         return;
                      }
-                     std::memcpy(&i, it, sizeof(i));
+                     using I = std::decay_t<decltype(i)>;
+                     std::memcpy(&i, it, sizeof(I));
+                     if constexpr (std::endian::native == std::endian::big && sizeof(I) > 1) {
+                        byteswap_le(i);
+                     }
                      value = static_cast<V>(i);
                      it += sizeof(i);
                   };
@@ -302,10 +305,16 @@ namespace glz
          if constexpr (is_volatile) {
             V temp;
             std::memcpy(&temp, it, sizeof(V));
+            if constexpr (std::endian::native == std::endian::big && sizeof(V) > 1) {
+               byteswap_le(temp);
+            }
             value = temp;
          }
          else {
             std::memcpy(&value, it, sizeof(V));
+            if constexpr (std::endian::native == std::endian::big && sizeof(V) > 1) {
+               byteswap_le(value);
+            }
          }
          it += sizeof(V);
       }
@@ -338,7 +347,15 @@ namespace glz
                return;
             }
 
-            std::memcpy(&value, it, sizeof(V));
+            if constexpr (std::endian::native == std::endian::big && sizeof(V) > 1) {
+               V temp;
+               std::memcpy(&temp, it, sizeof(V));
+               byteswap_le(temp);
+               value = static_cast<std::decay_t<T>>(temp);
+            }
+            else {
+               std::memcpy(&value, it, sizeof(V));
+            }
             it += sizeof(V);
          }
          else {
@@ -360,7 +377,15 @@ namespace glz
                return;
             }
 
-            std::memcpy(&value, it, sizeof(V));
+            if constexpr (std::endian::native == std::endian::big && sizeof(V) > 1) {
+               V temp;
+               std::memcpy(&temp, it, sizeof(V));
+               byteswap_le(temp);
+               value = static_cast<std::decay_t<T>>(temp);
+            }
+            else {
+               std::memcpy(&value, it, sizeof(V));
+            }
             it += sizeof(V);
          }
       }
@@ -380,8 +405,21 @@ namespace glz
                return;
             }
 
-            std::memcpy(&value, it, sizeof(V));
-            it += sizeof(V);
+            if constexpr (std::endian::native == std::endian::big) {
+               using X = typename V::value_type;
+               X real_part, imag_part;
+               std::memcpy(&real_part, it, sizeof(X));
+               it += sizeof(X);
+               std::memcpy(&imag_part, it, sizeof(X));
+               it += sizeof(X);
+               byteswap_le(real_part);
+               byteswap_le(imag_part);
+               value = V{real_part, imag_part};
+            }
+            else {
+               std::memcpy(&value, it, sizeof(V));
+               it += sizeof(V);
+            }
          }
          else {
             constexpr uint8_t header = tag::extensions | 0b00011'000;
@@ -416,8 +454,20 @@ namespace glz
                return;
             }
 
-            std::memcpy(&value, it, 2 * sizeof(V));
-            it += 2 * sizeof(V);
+            if constexpr (std::endian::native == std::endian::big) {
+               V real_part, imag_part;
+               std::memcpy(&real_part, it, sizeof(V));
+               it += sizeof(V);
+               std::memcpy(&imag_part, it, sizeof(V));
+               it += sizeof(V);
+               byteswap_le(real_part);
+               byteswap_le(imag_part);
+               value = std::decay_t<T>{real_part, imag_part};
+            }
+            else {
+               std::memcpy(&value, it, 2 * sizeof(V));
+               it += 2 * sizeof(V);
+            }
          }
       }
    };
@@ -639,6 +689,9 @@ namespace glz
 
                V x;
                std::memcpy(&x, it, sizeof(V));
+               if constexpr (std::endian::native == std::endian::big) {
+                  byteswap_le(x);
+               }
                it += sizeof(V);
                value.emplace(x);
             }
@@ -840,19 +893,35 @@ namespace glz
                   std::is_volatile_v<std::remove_reference_t<std::remove_pointer_t<decltype(value.data())>>>;
 
                if constexpr (is_volatile) {
-                  V temp;
                   for (size_t i = 0; i < n; ++i) {
                      if ((it + sizeof(V)) > end) [[unlikely]] {
                         ctx.error = error_code::unexpected_end;
                         return;
                      }
 
+                     V temp;
                      std::memcpy(&temp, it, sizeof(V));
+                     if constexpr (std::endian::native == std::endian::big) {
+                        byteswap_le(temp);
+                     }
                      value[i] = temp;
                      it += sizeof(V);
                   }
                }
+               else if constexpr (std::endian::native == std::endian::big && sizeof(V) > 1) {
+                  // On big endian, read and swap each element
+                  if ((it + n * sizeof(V)) > end) [[unlikely]] {
+                     ctx.error = error_code::unexpected_end;
+                     return;
+                  }
+                  for (size_t i = 0; i < n; ++i) {
+                     std::memcpy(&value[i], it, sizeof(V));
+                     byteswap_le(value[i]);
+                     it += sizeof(V);
+                  }
+               }
                else {
+                  // Little endian or single-byte: bulk memcpy
                   if ((it + n * sizeof(V)) > end) [[unlikely]] {
                      ctx.error = error_code::unexpected_end;
                      return;
@@ -869,6 +938,9 @@ namespace glz
                   }
 
                   std::memcpy(&x, it, sizeof(V));
+                  if constexpr (std::endian::native == std::endian::big) {
+                     byteswap_le(x);
+                  }
                   it += sizeof(V);
                }
             }
@@ -965,12 +1037,34 @@ namespace glz
             }
 
             if constexpr (contiguous<T>) {
-               std::memcpy(value.data(), it, n * sizeof(V));
-               it += n * sizeof(V);
+               if constexpr (std::endian::native == std::endian::big && sizeof(X) > 1) {
+                  // On big endian, read and swap each complex element's components
+                  for (size_t i = 0; i < n; ++i) {
+                     std::memcpy(&value[i], it, sizeof(V));
+                     X real_part = value[i].real();
+                     X imag_part = value[i].imag();
+                     byteswap_le(real_part);
+                     byteswap_le(imag_part);
+                     value[i] = V(real_part, imag_part);
+                     it += sizeof(V);
+                  }
+               }
+               else {
+                  // Little endian or single-byte: bulk memcpy
+                  std::memcpy(value.data(), it, n * sizeof(V));
+                  it += n * sizeof(V);
+               }
             }
             else {
                for (auto&& x : value) {
                   std::memcpy(&x, it, sizeof(V));
+                  if constexpr (std::endian::native == std::endian::big && sizeof(X) > 1) {
+                     X real_part = x.real();
+                     X imag_part = x.imag();
+                     byteswap_le(real_part);
+                     byteswap_le(imag_part);
+                     x = V(real_part, imag_part);
+                  }
                   it += sizeof(V);
                }
             }
@@ -1143,7 +1237,7 @@ namespace glz
          constexpr uint8_t key_tag = beve_key_traits<Key>::key_tag;
 
          if constexpr (beve_key_traits<Key>::as_number) {
-            Key key;
+            Key key{}; // Value-initialize to silence false positive -Wmaybe-uninitialized
             for (size_t i = 0; i < n; ++i) {
                if constexpr (Opts.partial_read) {
                   parse<BEVE>::op<no_header_on<Opts>()>(key, key_tag, ctx, it, end);
@@ -1651,5 +1745,131 @@ namespace glz
    [[nodiscard]] inline error_ctx read_file_beve_untagged(T& value, const std::string& file_name, auto&& buffer)
    {
       return read_file_beve<opt_true<Opts, &opts::structs_as_arrays>>(value, file_name, buffer);
+   }
+
+   // ===== Delimited BEVE support for multiple objects in one buffer =====
+
+   // Skip a delimiter byte if present at the current position
+   // Returns true if a delimiter was skipped, false otherwise
+   GLZ_ALWAYS_INLINE bool skip_beve_delimiter(auto&& it, auto end) noexcept
+   {
+      if (it < end && uint8_t(*it) == tag::delimiter) {
+         ++it;
+         return true;
+      }
+      return false;
+   }
+
+   // Read multiple delimiter-separated BEVE values from a buffer into a container
+   template <auto Opts = opts{}, class Container, class Buffer>
+      requires readable_array_t<Container> && (emplace_backable<Container> || !resizable<Container>)
+   [[nodiscard]] error_ctx read_beve_delimited(Container& values, Buffer&& buffer)
+   {
+      static_assert(sizeof(decltype(*buffer.data())) == 1);
+
+      if (buffer.empty()) {
+         if constexpr (resizable<Container>) {
+            values.clear();
+         }
+         return {};
+      }
+
+      context ctx{};
+      auto it = reinterpret_cast<const char*>(buffer.data());
+      auto end = it + buffer.size();
+      auto start = it;
+
+      if constexpr (resizable<Container>) {
+         values.clear();
+      }
+
+      size_t index = 0;
+      const size_t container_size = values.size();
+
+      while (it < end) {
+         // Skip delimiter if present (except before first value)
+         if (index > 0) {
+            skip_beve_delimiter(it, end);
+         }
+
+         if (it >= end) {
+            break;
+         }
+
+         if constexpr (emplace_backable<Container>) {
+            auto& value = values.emplace_back();
+            parse<BEVE>::template op<set_beve<Opts>()>(value, ctx, it, end);
+         }
+         else {
+            if (index >= container_size) {
+               ctx.error = error_code::exceeded_static_array_size;
+               break;
+            }
+            parse<BEVE>::template op<set_beve<Opts>()>(values[index], ctx, it, end);
+         }
+
+         if (bool(ctx.error)) [[unlikely]] {
+            return {ctx.error, ctx.custom_error_message, size_t(it - start), ctx.includer_error};
+         }
+
+         ++index;
+      }
+
+      return {ctx.error, ctx.custom_error_message, size_t(it - start), ctx.includer_error};
+   }
+
+   // Read multiple delimiter-separated BEVE values, returning the container
+   template <class Container, auto Opts = opts{}, class Buffer>
+      requires readable_array_t<Container> && (emplace_backable<Container> || !resizable<Container>)
+   [[nodiscard]] expected<Container, error_ctx> read_beve_delimited(Buffer&& buffer)
+   {
+      Container values{};
+      const auto ec = read_beve_delimited<Opts>(values, std::forward<Buffer>(buffer));
+      if (bool(ec)) [[unlikely]] {
+         return unexpected(ec);
+      }
+      return values;
+   }
+
+   // Read a single BEVE value from a buffer at a given offset.
+   // If a delimiter byte (0x06) is present at the offset, it is automatically skipped.
+   // Returns the total bytes consumed from offset (including any skipped delimiter),
+   // so the next read offset is simply: offset + *result
+   //
+   // Example:
+   //   size_t offset = 0;
+   //   while (offset < buffer.size()) {
+   //      auto result = glz::read_beve_at(value, buffer, offset);
+   //      if (!result) break;
+   //      offset += *result;  // correctly advances past delimiter + value
+   //   }
+   template <auto Opts = opts{}, read_supported<BEVE> T, class Buffer>
+   [[nodiscard]] glz::expected<size_t, error_ctx> read_beve_at(T& value, Buffer&& buffer, size_t offset = 0)
+   {
+      static_assert(sizeof(decltype(*buffer.data())) == 1);
+
+      if (offset >= buffer.size()) {
+         return glz::unexpected(error_ctx{error_code::unexpected_end});
+      }
+
+      context ctx{};
+      auto it = reinterpret_cast<const char*>(buffer.data()) + offset;
+      auto end = reinterpret_cast<const char*>(buffer.data()) + buffer.size();
+      auto start = it;
+
+      // Skip leading delimiter if present (included in returned byte count)
+      skip_beve_delimiter(it, end);
+
+      if (it >= end) {
+         return glz::unexpected(error_ctx{error_code::unexpected_end});
+      }
+
+      parse<BEVE>::template op<set_beve<Opts>()>(value, ctx, it, end);
+
+      if (bool(ctx.error)) [[unlikely]] {
+         return glz::unexpected(error_ctx{ctx.error, ctx.custom_error_message, size_t(it - start), ctx.includer_error});
+      }
+
+      return size_t(it - start); // total bytes consumed from offset (delimiter + value)
    }
 }
