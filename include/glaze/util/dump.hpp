@@ -63,6 +63,20 @@ namespace glz
       }
    }
 
+   // Low-level buffer write primitives (dump functions)
+   // ================================================
+   // These functions write directly to the buffer WITHOUT bounds checking for bounded buffers.
+   //
+   // Contract:
+   // - For resizable buffers (std::string, std::vector): Auto-resizes when Checked=true (default)
+   // - For bounded buffers (std::array, std::span): Caller MUST call ensure_space() first
+   // - For raw pointers: Caller assumes responsibility for sufficient space
+   //
+   // The Checked template parameter ONLY enables auto-resize for resizable buffers.
+   // It does NOT enable bounds checking for bounded buffers - that would require ctx for error reporting
+   // and would duplicate the ensure_space() logic. The padding model (ensure_space checks for
+   // ix + n + write_padding_bytes) guarantees sufficient space for subsequent dump calls.
+
    template <bool Checked = true, class B>
    GLZ_ALWAYS_INLINE void dump(const byte_sized auto c, B& b, size_t& ix) noexcept(not vector_like<B>)
    {
@@ -122,6 +136,7 @@ namespace glz
    }
 
    template <auto c, class B>
+   [[deprecated("use dumpn(c, n, b, ix) instead of dumpn<c>(n, b, ix) to reduce template instantiations")]]
    GLZ_ALWAYS_INLINE void dumpn(size_t n, B& b, size_t& ix) noexcept(not vector_like<B>)
    {
       if constexpr (vector_like<B>) {
@@ -134,14 +149,39 @@ namespace glz
       ix += n;
    }
 
+   template <class B>
+   GLZ_ALWAYS_INLINE void dumpn(const byte_sized auto c, size_t n, B& b, size_t& ix) noexcept(not vector_like<B>)
+   {
+      if constexpr (vector_like<B>) {
+         const auto k = ix + n;
+         if (k > b.size()) [[unlikely]] {
+            b.resize(2 * k);
+         }
+      }
+      std::memset(&b[ix], c, n);
+      ix += n;
+   }
+
    template <auto c, class B>
+   [[deprecated(
+      "use dumpn_unchecked(c, n, b, ix) instead of dumpn_unchecked<c>(n, b, ix) to reduce template instantiations")]]
    GLZ_ALWAYS_INLINE void dumpn_unchecked(size_t n, B& b, size_t& ix) noexcept
    {
       std::memset(&b[ix], c, n);
       ix += n;
    }
 
+   template <class B>
+   GLZ_ALWAYS_INLINE void dumpn_unchecked(const byte_sized auto c, size_t n, B& b, size_t& ix) noexcept
+   {
+      std::memset(&b[ix], c, n);
+      ix += n;
+   }
+
    template <char IndentChar, class B>
+   [[deprecated(
+      "use dump_newline_indent(c, n, b, ix) instead of dump_newline_indent<c>(n, b, ix) to reduce template "
+      "instantiations")]]
    GLZ_ALWAYS_INLINE void dump_newline_indent(size_t n, B& b, size_t& ix) noexcept(not vector_like<B>)
    {
       if constexpr (vector_like<B>) {
@@ -153,6 +193,22 @@ namespace glz
       assign_maybe_cast<'\n'>(b, ix);
       ++ix;
       std::memset(&b[ix], IndentChar, n);
+      ix += n;
+   }
+
+   template <class B>
+   GLZ_ALWAYS_INLINE void dump_newline_indent(const byte_sized auto c, size_t n, B& b,
+                                              size_t& ix) noexcept(not vector_like<B>)
+   {
+      if constexpr (vector_like<B>) {
+         if (const auto k = ix + n + write_padding_bytes; k > b.size()) [[unlikely]] {
+            b.resize(2 * k);
+         }
+      }
+
+      assign_maybe_cast('\n', b, ix);
+      ++ix;
+      std::memset(&b[ix], c, n);
       ix += n;
    }
 

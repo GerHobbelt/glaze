@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <type_traits>
 
+#include "glaze/core/context.hpp"
+#include "glaze/core/optimization_level.hpp"
+#include "glaze/util/inline.hpp"
 #include "glaze/util/type_traits.hpp"
 
 namespace glz
@@ -190,9 +193,51 @@ namespace glz
    // The maximum precision type used for writing floats, higher precision floats will be cast down to this precision
 
    // ---
+   // static constexpr std::string_view float_format = "{:.2f}";
+   // Format string for floating-point output using std::format (C++23)
+   // Must be a static constexpr member to be usable as a template parameter
+   // Example: "{:.2f}" for 2 decimal places, "{:.6g}" for 6 significant digits, "{:.0f}" for integers
+   // When specified, uses std::format_to instead of Dragonbox for float/double serialization
+
+   // ---
    // bool skip_self_constraint = false;
    // Skip self_constraint validation during reading. Useful for performance when constraints are known to be valid
    // or when validation should be deferred.
+
+   // ---
+   // bool linear_search = false;
+   // Uses linear key search instead of hash-based lookup for JSON object fields.
+   // This eliminates 256-byte hash tables per struct type, significantly reducing binary size.
+   // Trades O(1) hash lookup for O(N) linear search - faster for small structs (< ~8 fields)
+   // due to cache effects, and much smaller binaries for embedded systems.
+
+   // ---
+   // optimization_level optimization_level = optimization_level::normal;
+   // Controls speed vs binary size tradeoff. See glaze/core/optimization_level.hpp for details.
+   // Levels: size, normal (default)
+   // Use preset struct: glz::opts_size
+
+   // ---
+   // size_t max_string_length = 0;
+   // Maximum length for string allocations when reading. 0 means no limit (default).
+   // When set, strings exceeding this length will fail with error_code::invalid_length.
+   // Useful for preventing memory exhaustion attacks from malicious input.
+   // Currently applies to BEVE format.
+
+   // ---
+   // size_t max_array_size = 0;
+   // Maximum size for array/vector allocations when reading. 0 means no limit (default).
+   // When set, arrays exceeding this size will fail with error_code::invalid_length.
+   // Useful for preventing memory exhaustion attacks from malicious input.
+   // Currently applies to BEVE format.
+
+   // ---
+   // bool allocate_raw_pointers = false;
+   // When true, allows Glaze to allocate memory for null raw pointers during deserialization using `new`.
+   // By default, Glaze refuses to read into null raw pointers because it would have to call `new`
+   // without any known way to delete the memory, making memory leaks easy.
+   // Enable this option only when you are prepared to manually manage the allocated memory.
+   // Works with JSON, BEVE, CBOR, and MSGPACK formats.
 
    struct append_arrays_opt_tag
    {};
@@ -403,6 +448,111 @@ namespace glz
       }
    }
 
+   consteval bool check_assume_sufficient_buffer(auto&& Opts)
+   {
+      if constexpr (requires { Opts.assume_sufficient_buffer; }) {
+         return Opts.assume_sufficient_buffer;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval bool check_linear_search(auto&& Opts)
+   {
+      if constexpr (requires { Opts.linear_search; }) {
+         return Opts.linear_search;
+      }
+      else {
+         // In size mode, default to linear search (no hash tables)
+         if constexpr (requires { Opts.optimization_level; }) {
+            return Opts.optimization_level == optimization_level::size;
+         }
+         return false;
+      }
+   }
+
+   consteval size_t check_max_string_length(auto&& Opts)
+   {
+      if constexpr (requires { Opts.max_string_length; }) {
+         return Opts.max_string_length;
+      }
+      else {
+         return 0; // 0 means no limit
+      }
+   }
+
+   consteval size_t check_max_array_size(auto&& Opts)
+   {
+      if constexpr (requires { Opts.max_array_size; }) {
+         return Opts.max_array_size;
+      }
+      else {
+         return 0; // 0 means no limit
+      }
+   }
+
+   consteval size_t check_max_map_size(auto&& Opts)
+   {
+      if constexpr (requires { Opts.max_map_size; }) {
+         return Opts.max_map_size;
+      }
+      else {
+         return 0; // 0 means no limit
+      }
+   }
+
+   consteval bool check_allocate_raw_pointers(auto&& Opts)
+   {
+      if constexpr (requires { Opts.allocate_raw_pointers; }) {
+         return Opts.allocate_raw_pointers;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval optimization_level check_optimization_level(auto&& Opts)
+   {
+      if constexpr (requires { Opts.optimization_level; }) {
+         return Opts.optimization_level;
+      }
+      else {
+         return optimization_level::normal;
+      }
+   }
+
+   consteval bool is_size_optimized(auto&& Opts) { return check_optimization_level(Opts) == optimization_level::size; }
+
+   // Check if raw pointer allocation is possible (either compile-time or runtime option available)
+   template <auto Opts, class Ctx>
+   concept can_allocate_raw_pointer = check_allocate_raw_pointers(Opts) || has_runtime_allocate_raw_pointers<Ctx>;
+
+   // Helper to attempt allocation of a null raw pointer during deserialization.
+   // Compile-time allocate_raw_pointers option takes precedence over runtime context.
+   // Returns true on success, false on failure (with ctx.error set to invalid_nullable_read).
+   // Only call this when can_allocate_raw_pointer<Opts, Ctx> is satisfied.
+   template <auto Opts, class Ptr, class Ctx>
+      requires(std::is_pointer_v<std::remove_cvref_t<Ptr>> && can_allocate_raw_pointer<Opts, std::decay_t<Ctx>>)
+   GLZ_ALWAYS_INLINE constexpr bool try_allocate_raw_pointer(Ptr& value, Ctx& ctx) noexcept
+   {
+      using PtrType = std::remove_cvref_t<Ptr>;
+      using PointedType = std::remove_pointer_t<PtrType>;
+
+      if constexpr (check_allocate_raw_pointers(Opts)) {
+         value = new PointedType{};
+         return true;
+      }
+      else if constexpr (has_runtime_allocate_raw_pointers<std::decay_t<Ctx>>) {
+         if (ctx.allocate_raw_pointers) {
+            value = new PointedType{};
+            return true;
+         }
+         ctx.error = error_code::invalid_nullable_read;
+         return false;
+      }
+   }
+
    consteval bool check_opening_handled(auto&& o) { return o.internal & uint32_t(opts_internal::opening_handled); }
 
    consteval bool check_closing_handled(auto&& o) { return o.internal & uint32_t(opts_internal::closing_handled); }
@@ -454,12 +604,18 @@ namespace glz
       return ret;
    }
 
+   // Skip ws_handled optimization when minified (skip_ws is a no-op, so the flag is pointless)
    template <auto Opts>
    constexpr auto ws_handled()
    {
-      auto ret = Opts;
-      ret.internal |= uint32_t(opts_internal::ws_handled);
-      return ret;
+      if constexpr (Opts.minified) {
+         return Opts;
+      }
+      else {
+         auto ret = Opts;
+         ret.internal |= uint32_t(opts_internal::ws_handled);
+         return ret;
+      }
    }
 
    template <auto Opts>
@@ -775,4 +931,10 @@ namespace glz
    template <uint32_t Format>
    struct serialize_partial
    {};
+
+   // Preset options for size-optimized builds (embedded systems)
+   struct opts_size : opts
+   {
+      glz::optimization_level optimization_level = glz::optimization_level::size;
+   };
 }

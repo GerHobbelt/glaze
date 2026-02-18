@@ -125,3 +125,35 @@ add_executable(json_merge_patch_test json_merge_patch_test.cpp)
 target_link_libraries(json_merge_patch_test PRIVATE glz_test_common)
 
 add_test(NAME json_merge_patch_test COMMAND json_merge_patch_test)
+
+## Linear search test - test for linear_search compile-time option
+
+add_executable(linear_search_test linear_search_test.cpp)
+
+target_link_libraries(linear_search_test PRIVATE glz_test_common)
+
+add_test(NAME linear_search_test COMMAND linear_search_test)
+
+## Allocate raw pointers test - test for allocate_raw_pointers compile-time option (issue #2192)
+
+add_executable(allocate_raw_pointers_test allocate_raw_pointers_test.cpp)
+
+target_link_libraries(allocate_raw_pointers_test PRIVATE glz_test_common)
+
+add_test(NAME allocate_raw_pointers_test COMMAND allocate_raw_pointers_test)
+
+## snprintf fallback test - tests float_format with forced snprintf fallback (for iOS < 16.3 compatibility)
+
+add_executable(snprintf_fallback_test snprintf_fallback_test.cpp)
+
+target_link_libraries(snprintf_fallback_test PRIVATE glz_test_common)
+
+add_test(NAME snprintf_fallback_test COMMAND snprintf_fallback_test)
+
+## glz::lazy test - lazy JSON type that stores string_views
+
+add_executable(lazy_test lazy_test.cpp)
+
+target_link_libraries(lazy_test PRIVATE glz_test_common)
+
+add_test(NAME lazy_test COMMAND lazy_test)

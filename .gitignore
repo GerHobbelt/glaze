@@ -53,3 +53,7 @@ alabastar.beve
 *.csv
 *.beve
 *.pem
+
+# Benchmark comparison directory
+benchmarks/
+pr_description.md

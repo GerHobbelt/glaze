@@ -1990,13 +1990,13 @@ suite early_end = [] {
          // This is mainly to check if all our end checks are in place.
          auto ec = glz::read<options>(obj, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read<options>(json, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read<options>(skip_me, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
       }
    };
 
@@ -2013,13 +2013,13 @@ suite early_end = [] {
          // This is mainly to check if all our end checks are in place.
          auto ec = glz::read_json(obj, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read_json(json, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read_json(skip_me, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
       }
    };
 
@@ -2039,13 +2039,13 @@ suite early_end = [] {
          // This is mainly to check if all our end checks are in place.
          auto ec = glz::read<options>(obj, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read<options>(json, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read<options>(skip_me, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
       }
    };
 
@@ -3752,8 +3752,9 @@ suite allocated_write = [] {
       my_struct v{};
       std::string s{};
       s.resize(100);
-      auto length = glz::write_json(v, s.data()).value();
-      s.resize(length);
+      auto result = glz::write_json(v, s.data());
+      expect(!result) << "write should succeed";
+      s.resize(result.count);
       expect(s == R"({"i":287,"d":3.14,"hello":"Hello World","arr":[1,2,3]})");
    };
 };
@@ -9799,8 +9800,8 @@ suite partial_write_tests = [] {
       static constexpr auto json_ptrs = glz::json_ptrs("/name");
       zoo_t obj{};
       char buf[32]{};
-      const auto length = glz::write_json<json_ptrs>(obj, buf);
-      expect(length.has_value());
+      const auto result = glz::write_json<json_ptrs>(obj, buf);
+      expect(!result) << "write should succeed";
       expect(std::string_view{buf} == R"({"name":"My Awesome Zoo"})");
    };
 
@@ -9915,8 +9916,8 @@ suite runtime_partial_write_tests = [] {
       std::vector<std::string> keys = {"a"};
 
       auto result = glz::write_json_partial(obj, keys, buf);
-      expect(result.has_value());
-      expect(std::string_view(buf, *result) == R"({"a":99})");
+      expect(!result) << "write should succeed";
+      expect(std::string_view(buf, result.count) == R"({"a":99})");
    };
 
    "runtime partial write - return string"_test = [] {
@@ -10036,8 +10037,8 @@ suite runtime_exclude_write_tests = [] {
       std::vector<std::string> exclude = {"b", "c", "d"};
 
       auto result = glz::write_json_exclude(obj, exclude, buf);
-      expect(result.has_value());
-      expect(std::string_view(buf, *result) == R"({"a":99})");
+      expect(!result) << "write should succeed";
+      expect(std::string_view(buf, result.count) == R"({"a":99})");
    };
 
    "runtime exclude write - return string"_test = [] {
@@ -10366,8 +10367,8 @@ suite zoo_exclude_write_tests = [] {
       std::vector<std::string> exclude = {"phone", "home_address"};
 
       auto result = glz::write_json_exclude(night_guard, exclude, buf);
-      expect(result.has_value());
-      std::string_view output(buf, *result);
+      expect(!result) << "write should succeed";
+      std::string_view output(buf, result.count);
       expect(output == R"({"name":"Larry Daley","employee_id":"NG-001","years_experience":5})") << output;
    };
 };
@@ -10773,6 +10774,403 @@ suite max_write_precision_tests = [] {
       write_precision_t obj{};
       std::string json_float = glz::write<float_opts{}>(obj).value_or("error");
       expect(json_float == R"({"pi":3.1415927})") << json_float;
+   };
+};
+
+// float_format option structs for testing various format specifiers
+struct float_format_2f : glz::opts
+{
+   static constexpr std::string_view float_format = "{:.2f}";
+};
+
+struct float_format_0f : glz::opts
+{
+   static constexpr std::string_view float_format = "{:.0f}";
+};
+
+struct float_format_6f : glz::opts
+{
+   static constexpr std::string_view float_format = "{:.6f}";
+};
+
+struct float_format_2e : glz::opts
+{
+   static constexpr std::string_view float_format = "{:.2e}";
+};
+
+struct float_format_4E : glz::opts
+{
+   static constexpr std::string_view float_format = "{:.4E}";
+};
+
+struct float_format_6g : glz::opts
+{
+   static constexpr std::string_view float_format = "{:.6g}";
+};
+
+struct float_format_high_precision : glz::opts
+{
+   // High precision to test buffer resize path (exceeds 64 byte pre-allocation)
+   static constexpr std::string_view float_format = "{:.80f}";
+};
+
+struct float_format_coordinates
+{
+   double lat;
+   double lon;
+};
+
+struct float_format_mixed_t
+{
+   int count;
+   double value;
+   std::string name;
+};
+
+suite float_format_tests = [] {
+   // === Basic formatting tests ===
+
+   "float_format_fixed_2_decimals"_test = [] {
+      double pi = std::numbers::pi_v<double>;
+      std::string json = glz::write<float_format_2f{}>(pi).value_or("error");
+      expect(json == "3.14") << json;
+   };
+
+   "float_format_fixed_6_decimals"_test = [] {
+      double pi = std::numbers::pi_v<double>;
+      std::string json = glz::write<float_format_6f{}>(pi).value_or("error");
+      expect(json == "3.141593") << json;
+   };
+
+   "float_format_fixed_0_decimals"_test = [] {
+      double value = 3.7;
+      std::string json = glz::write<float_format_0f{}>(value).value_or("error");
+      expect(json == "4") << json;
+
+      value = 3.2;
+      json = glz::write<float_format_0f{}>(value).value_or("error");
+      expect(json == "3") << json;
+   };
+
+   "float_format_scientific_lowercase"_test = [] {
+      double value = 1234567.89;
+      std::string json = glz::write<float_format_2e{}>(value).value_or("error");
+      expect(json == "1.23e+06") << json;
+   };
+
+   "float_format_scientific_uppercase"_test = [] {
+      double value = 1234567.89;
+      std::string json = glz::write<float_format_4E{}>(value).value_or("error");
+      expect(json == "1.2346E+06") << json;
+   };
+
+   "float_format_general"_test = [] {
+      double value = 0.000123456;
+      std::string json = glz::write<float_format_6g{}>(value).value_or("error");
+      expect(json == "0.000123456") << json;
+
+      value = 1234567.89;
+      json = glz::write<float_format_6g{}>(value).value_or("error");
+      expect(json == "1.23457e+06") << json;
+   };
+
+   // === Rounding behavior tests ===
+
+   "float_format_rounding_up"_test = [] {
+      double value = 45.9999999999;
+      std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+      expect(json == "46.00") << json;
+
+      json = glz::write<float_format_0f{}>(value).value_or("error");
+      expect(json == "46") << json;
+   };
+
+   "float_format_rounding_down"_test = [] {
+      double value = 16.0000000001;
+      std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+      expect(json == "16.00") << json;
+   };
+
+   "float_format_rounding_half"_test = [] {
+      double value = 2.5;
+      std::string json = glz::write<float_format_0f{}>(value).value_or("error");
+      // Banker's rounding or round half to even
+      expect(json == "2" || json == "3") << json;
+
+      value = 3.5;
+      json = glz::write<float_format_0f{}>(value).value_or("error");
+      expect(json == "4" || json == "3") << json;
+   };
+
+   // === Edge case value tests ===
+
+   "float_format_zero"_test = [] {
+      double value = 0.0;
+      std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+      expect(json == "0.00") << json;
+
+      json = glz::write<float_format_2e{}>(value).value_or("error");
+      expect(json == "0.00e+00") << json;
+   };
+
+   "float_format_negative_zero"_test = [] {
+      double value = -0.0;
+      std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+      expect(json == "-0.00" || json == "0.00") << json;
+   };
+
+   "float_format_negative_values"_test = [] {
+      double value = -3.14159;
+      std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+      expect(json == "-3.14") << json;
+
+      json = glz::write<float_format_2e{}>(value).value_or("error");
+      expect(json == "-3.14e+00") << json;
+   };
+
+   "float_format_very_small"_test = [] {
+      double value = 0.000000123;
+      std::string json = glz::write<float_format_2e{}>(value).value_or("error");
+      expect(json == "1.23e-07") << json;
+
+      json = glz::write<float_format_6g{}>(value).value_or("error");
+      expect(json == "1.23e-07") << json;
+   };
+
+   "float_format_very_large"_test = [] {
+      double value = 1.23e15;
+      std::string json = glz::write<float_format_2e{}>(value).value_or("error");
+      expect(json == "1.23e+15") << json;
+
+      json = glz::write<float_format_0f{}>(value).value_or("error");
+      expect(json == "1230000000000000") << json;
+   };
+
+   // === Float type (32-bit) tests ===
+
+   "float_format_float32_basic"_test = [] {
+      float pi = std::numbers::pi_v<float>;
+      std::string json = glz::write<float_format_2f{}>(pi).value_or("error");
+      expect(json == "3.14") << json;
+   };
+
+   "float_format_float32_scientific"_test = [] {
+      float value = 1.23e10f;
+      std::string json = glz::write<float_format_2e{}>(value).value_or("error");
+      expect(json == "1.23e+10") << json;
+   };
+
+   "float_format_float32_negative"_test = [] {
+      float value = -2.5f;
+      std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+      expect(json == "-2.50") << json;
+   };
+
+   // === Buffer handling tests ===
+
+   "float_format_high_precision_buffer_resize"_test = [] {
+      // This tests the buffer resize path - output exceeds 64 byte pre-allocation
+      double pi = std::numbers::pi_v<double>;
+      std::string json = glz::write<float_format_high_precision{}>(pi).value_or("error");
+      expect(json.size() > 64) << "Expected output > 64 chars, got: " << json.size();
+      expect(json.starts_with("3.14159265358979")) << json;
+   };
+
+   "float_format_into_preallocated_string"_test = [] {
+      double pi = std::numbers::pi_v<double>;
+      std::string buffer;
+      buffer.reserve(100);
+      auto ec = glz::write<float_format_2f{}>(pi, buffer);
+      expect(!ec) << "Expected no error";
+      expect(buffer == "3.14") << buffer;
+   };
+
+   // === Container tests ===
+
+   "float_format_vector"_test = [] {
+      std::vector<double> values{3.14159, 2.71828, 1.41421};
+      std::string json = glz::write<float_format_2f{}>(values).value_or("error");
+      expect(json == R"([3.14,2.72,1.41])") << json;
+   };
+
+   "float_format_array_fixed"_test = [] {
+      std::array<double, 3> values{1.111, 2.222, 3.333};
+      std::string json = glz::write<float_format_2f{}>(values).value_or("error");
+      expect(json == R"([1.11,2.22,3.33])") << json;
+   };
+
+   "float_format_nested_array"_test = [] {
+      std::vector<std::vector<double>> matrix{{1.1, 2.2}, {3.3, 4.4}};
+      std::string json = glz::write<float_format_2f{}>(matrix).value_or("error");
+      expect(json == R"([[1.10,2.20],[3.30,4.40]])") << json;
+   };
+
+   // === Object tests ===
+
+   "float_format_object"_test = [] {
+      float_format_coordinates point{16.0000000001, 45.9999999999};
+      std::string json = glz::write<float_format_2f{}>(point).value_or("error");
+      expect(json == R"({"lat":16.00,"lon":46.00})") << json;
+   };
+
+   "float_format_map"_test = [] {
+      std::map<std::string, double> data{{"pi", 3.14159}, {"e", 2.71828}};
+      std::string json = glz::write<float_format_2f{}>(data).value_or("error");
+      expect(json == R"({"e":2.72,"pi":3.14})") << json;
+   };
+
+   // === Default behavior (no float_format) still works ===
+
+   "float_format_default_unchanged"_test = [] {
+      double pi = std::numbers::pi_v<double>;
+      std::string json_default = glz::write_json(pi).value_or("error");
+      std::string json_formatted = glz::write<float_format_2f{}>(pi).value_or("error");
+
+      // Default should have full precision
+      expect(json_default.size() > json_formatted.size())
+         << "Default: " << json_default << ", Formatted: " << json_formatted;
+      expect(json_default == "3.141592653589793") << json_default;
+   };
+
+   // === Mixed integer and float in objects ===
+
+   "float_format_mixed_types"_test = [] {
+      float_format_mixed_t obj{42, 3.14159, "test"};
+      std::string json = glz::write<float_format_2f{}>(obj).value_or("error");
+      expect(json == R"({"count":42,"value":3.14,"name":"test"})") << json;
+   };
+};
+
+// === Per-member float_format wrapper tests ===
+
+struct per_member_float_format_t
+{
+   double value{3.14159265358979};
+   float other{2.71828f};
+};
+
+template <>
+struct glz::meta<per_member_float_format_t>
+{
+   using T = per_member_float_format_t;
+   static constexpr auto value =
+      glz::object("value", glz::float_format<&T::value, "{:.2f}">, "other", glz::float_format<&T::other, "{:.4f}">);
+};
+
+struct mixed_member_format_t
+{
+   double formatted{std::numbers::pi_v<double>};
+   double unformatted{std::numbers::e_v<double>};
+   int count{42};
+};
+
+template <>
+struct glz::meta<mixed_member_format_t>
+{
+   using T = mixed_member_format_t;
+   static constexpr auto value = glz::object("formatted", glz::float_format<&T::formatted, "{:.3f}">, "unformatted",
+                                             &T::unformatted, "count", &T::count);
+};
+
+struct scientific_format_t
+{
+   double large{1234567.89};
+   double small{0.000123456};
+};
+
+template <>
+struct glz::meta<scientific_format_t>
+{
+   using T = scientific_format_t;
+   static constexpr auto value =
+      glz::object("large", glz::float_format<&T::large, "{:.2e}">, "small", glz::float_format<&T::small, "{:.3E}">);
+};
+
+suite float_format_wrapper_tests = [] {
+   "float_format_wrapper_basic_write"_test = [] {
+      per_member_float_format_t obj{};
+      std::string json;
+      auto ec = glz::write_json(obj, json);
+      expect(!ec) << glz::format_error(ec, json);
+      expect(json == R"({"value":3.14,"other":2.7183})") << json;
+   };
+
+   "float_format_wrapper_basic_read"_test = [] {
+      per_member_float_format_t obj{};
+      std::string input = R"({"value":1.5,"other":2.5})";
+      auto ec = glz::read_json(obj, input);
+      expect(!ec) << glz::format_error(ec, input);
+      expect(obj.value == 1.5);
+      expect(obj.other == 2.5f);
+   };
+
+   "float_format_wrapper_roundtrip"_test = [] {
+      per_member_float_format_t obj{123.456789, 9.87654f};
+      std::string json;
+      expect(!glz::write_json(obj, json));
+      // Written with format, read back should work
+      per_member_float_format_t obj2{};
+      expect(!glz::read_json(obj2, json));
+      // Values will be truncated due to formatting
+      expect(std::abs(obj2.value - 123.46) < 0.01);
+      expect(std::abs(obj2.other - 9.8765f) < 0.0001f);
+   };
+
+   "float_format_wrapper_mixed_members"_test = [] {
+      mixed_member_format_t obj{};
+      std::string json;
+      expect(!glz::write_json(obj, json));
+      // formatted uses 3 decimal places, unformatted has full precision
+      expect(json.find("\"formatted\":3.142") != std::string::npos) << json;
+      expect(json.find("\"count\":42") != std::string::npos) << json;
+   };
+
+   "float_format_wrapper_mixed_read"_test = [] {
+      mixed_member_format_t obj{};
+      std::string input = R"({"formatted":1.5,"unformatted":2.5,"count":100})";
+      expect(!glz::read_json(obj, input));
+      expect(obj.formatted == 1.5);
+      expect(obj.unformatted == 2.5);
+      expect(obj.count == 100);
+   };
+
+   "float_format_wrapper_scientific"_test = [] {
+      scientific_format_t obj{};
+      std::string json;
+      expect(!glz::write_json(obj, json));
+      // Check scientific notation format
+      expect(json.find("1.23e+06") != std::string::npos || json.find("1.23e+6") != std::string::npos) << json;
+      expect(json.find("1.235E-04") != std::string::npos || json.find("1.235E-4") != std::string::npos) << json;
+   };
+
+   "float_format_wrapper_read_scientific"_test = [] {
+      scientific_format_t obj{};
+      std::string input = R"({"large":1e6,"small":1e-6})";
+      expect(!glz::read_json(obj, input));
+      expect(obj.large == 1e6);
+      expect(obj.small == 1e-6);
+   };
+
+   "float_format_wrapper_negative_values"_test = [] {
+      per_member_float_format_t obj{-123.456789, -9.87654f};
+      std::string json;
+      expect(!glz::write_json(obj, json));
+      expect(json == R"({"value":-123.46,"other":-9.8765})") << json;
+   };
+
+   "float_format_wrapper_zero"_test = [] {
+      per_member_float_format_t obj{0.0, 0.0f};
+      std::string json;
+      expect(!glz::write_json(obj, json));
+      expect(json == R"({"value":0.00,"other":0.0000})") << json;
+   };
+
+   "float_format_wrapper_special_values"_test = [] {
+      per_member_float_format_t obj{std::numeric_limits<double>::infinity(), -std::numeric_limits<float>::infinity()};
+      std::string json;
+      expect(!glz::write_json(obj, json));
+      // std::format handles infinity
+      expect(json.find("inf") != std::string::npos) << json;
    };
 };
 
@@ -11380,8 +11778,8 @@ suite msvc_ice_tests = [] {
 };
 
 suite error_codes_test = [] {
-   expect(glz::format_error(glz::error_ctx{glz::error_code::none}) == "none");
-   expect(glz::format_error(glz::error_ctx{glz::error_code::expected_brace}) == "expected_brace");
+   expect(glz::format_error(glz::error_ctx{0, glz::error_code::none}) == "none");
+   expect(glz::format_error(glz::error_ctx{0, glz::error_code::expected_brace}) == "expected_brace");
 };
 
 struct front_16_t
@@ -12679,6 +13077,403 @@ suite requires_key_parsing_tests = [] {
       expect(obj.required == 42);
       expect(not obj.optional_by_type.has_value());
       expect(obj.optional_by_key == 0);
+   };
+};
+
+// Tests for bounded buffer overflow detection (issue #1285)
+namespace bounded_buffer_test_types
+{
+   struct simple_short
+   {
+      int x = 42;
+      std::string name = "hi";
+   };
+
+   struct simple_long
+   {
+      int x = 42;
+      std::string name = "hello world this is a long string";
+   };
+
+   struct simple_int_only
+   {
+      int x = 42;
+   };
+
+   struct simple_medium
+   {
+      int x = 42;
+      std::string name = "hello";
+   };
+
+   struct simple_very_long
+   {
+      int x = 42;
+      std::string long_name = "this is a very long string that won't fit";
+   };
+
+   // For deeply nested test
+   struct Inner
+   {
+      int x = 42;
+   };
+
+   struct Middle
+   {
+      Inner inner{};
+      std::string name = "test";
+   };
+
+   struct Outer
+   {
+      Middle middle{};
+      std::vector<int> data = {1, 2, 3, 4, 5};
+   };
+
+   // For round-trip test
+   struct ComplexStruct
+   {
+      int id = 123;
+      std::string name = "test object";
+      std::vector<double> values = {1.1, 2.2, 3.3};
+      std::optional<std::string> optional_field = "present";
+      bool active = true;
+   };
+
+   // For ec.count accuracy test - use vector to trigger overflow (string serialization has gaps)
+   struct OverflowTest
+   {
+      int a = 1;
+      std::vector<int> data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+      int b = 2;
+   };
+}
+
+suite bounded_buffer_overflow_tests = [] {
+   using namespace bounded_buffer_test_types;
+
+   "write to std::array with sufficient space succeeds"_test = [] {
+      simple_short obj{};
+      std::array<char, 512> buffer{}; // Minimum 512 bytes for bounded buffers
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "write should succeed with sufficient buffer";
+      expect(result.count > 0) << "count should be non-zero";
+      expect(result.count < buffer.size()) << "count should be less than buffer size";
+
+      std::string_view json(buffer.data(), result.count);
+      expect(json == R"({"x":42,"name":"hi"})") << "JSON should match expected";
+   };
+
+   "write to std::array that is too small returns buffer_overflow"_test = [] {
+      simple_long obj{};
+      std::array<char, 10> buffer{}; // Too small
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow error";
+   };
+
+   "write to std::span with sufficient space succeeds"_test = [] {
+      simple_int_only obj{};
+      std::array<char, 512> storage{}; // Minimum 512 bytes for bounded buffers
+      std::span<char> buffer(storage);
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "write should succeed with sufficient buffer";
+      expect(result.count > 0) << "count should be non-zero";
+
+      std::string_view json(buffer.data(), result.count);
+      expect(json == R"({"x":42})") << "JSON should match expected";
+   };
+
+   "write to std::span that is too small returns buffer_overflow"_test = [] {
+      simple_medium obj{};
+      std::array<char, 5> storage{};
+      std::span<char> buffer(storage); // Too small
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow error";
+   };
+
+   "write array to bounded buffer works correctly"_test = [] {
+      std::vector<int> arr{1, 2, 3, 4, 5};
+      std::array<char, 512> buffer{}; // Minimum 512 bytes for bounded buffers
+
+      auto result = glz::write_json(arr, buffer);
+      expect(not result) << "write should succeed";
+      std::string_view json(buffer.data(), result.count);
+      expect(json == "[1,2,3,4,5]") << "JSON array should match";
+   };
+
+   "write large array to small bounded buffer fails"_test = [] {
+      std::vector<int> arr{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+      std::array<char, 8> buffer{}; // Too small
+
+      auto result = glz::write_json(arr, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow for large array";
+   };
+
+   "resizable buffer still works as before"_test = [] {
+      simple_medium obj{};
+      std::string buffer;
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "write to resizable buffer should succeed";
+      expect(buffer == R"({"x":42,"name":"hello"})") << "JSON should match expected";
+   };
+
+   "error_ctx count reflects bytes written before overflow"_test = [] {
+      simple_very_long obj{};
+      std::array<char, 20> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow";
+      // count should reflect some bytes were written before overflow
+      expect(result.count > 0) << "some bytes should have been written before overflow";
+   };
+
+   // Test #3: Prettified output to bounded buffer
+   "prettified json to bounded buffer"_test = [] {
+      simple_short obj{};
+      std::array<char, 1024> buffer{};
+
+      auto result = glz::write<glz::opts{.prettify = true}>(obj, buffer);
+      expect(not result) << "prettified write should succeed";
+      expect(result.count > 0) << "count should be non-zero";
+
+      std::string_view json(buffer.data(), result.count);
+      // Verify output is actually prettified (contains newlines and indentation)
+      expect(json.find('\n') != std::string_view::npos) << "prettified output should contain newlines";
+      expect(json.find("   ") != std::string_view::npos) << "prettified output should contain indentation";
+   };
+
+   // Test #4: Deeply nested structures
+   "deeply nested struct to bounded buffer"_test = [] {
+      Outer obj{};
+      std::array<char, 1024> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "nested struct write should succeed";
+      expect(result.count > 0) << "count should be non-zero";
+
+      // Verify round-trip
+      Outer parsed{};
+      auto read_result = glz::read_json(parsed, std::string_view(buffer.data(), result.count));
+      expect(not read_result) << "read should succeed";
+      expect(parsed.middle.inner.x == obj.middle.inner.x) << "nested value should match";
+      expect(parsed.middle.name == obj.middle.name) << "nested string should match";
+      expect(parsed.data == obj.data) << "nested vector should match";
+   };
+
+   // Test #5: Array serialization (map with string keys triggers unimplemented string path)
+   "vector to bounded buffer succeeds"_test = [] {
+      std::vector<int> obj{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "vector write should succeed";
+      expect(result.count > 0) << "count should be non-zero";
+
+      std::string_view json(buffer.data(), result.count);
+      expect(json == "[1,2,3,4,5,6,7,8,9,10]") << "should match expected array";
+   };
+
+   "large vector to small bounded buffer fails"_test = [] {
+      std::vector<int> obj;
+      for (int i = 0; i < 200; ++i) {
+         obj.push_back(i);
+      }
+      // 512 bytes minimum - but too small for 200 integers
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "large vector should overflow small buffer";
+   };
+
+   // Test: Map with string keys to bounded buffer
+   "map with string keys to bounded buffer succeeds"_test = [] {
+      std::map<std::string, int> obj{{"alpha", 1}, {"beta", 2}, {"gamma", 3}};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "map write should succeed";
+      expect(result.count > 0) << "count should be non-zero";
+
+      std::string_view json(buffer.data(), result.count);
+      // Map order is sorted by key
+      expect(json == R"({"alpha":1,"beta":2,"gamma":3})") << "should match expected map JSON";
+   };
+
+   "map with long string keys to small buffer fails"_test = [] {
+      std::map<std::string, int> obj;
+      // Create keys that will exceed the buffer
+      for (int i = 0; i < 50; ++i) {
+         obj["key_with_a_reasonably_long_name_" + std::to_string(i)] = i;
+      }
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "large map should overflow small buffer";
+   };
+
+   "struct with string member to bounded buffer"_test = [] {
+      ComplexStruct obj{};
+      obj.name = "a test string that should serialize correctly";
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "struct with string should serialize successfully";
+      expect(result.count > 0) << "count should be non-zero";
+
+      // Verify round-trip
+      std::string_view json(buffer.data(), result.count);
+      ComplexStruct parsed{};
+      auto read_result = glz::read_json(parsed, json);
+      expect(not read_result) << "read should succeed";
+      expect(parsed.name == obj.name) << "string member should match";
+   };
+
+   // Test #8: Round-trip test with complex structure
+   "bounded buffer round-trip"_test = [] {
+      ComplexStruct original{};
+      std::array<char, 2048> buffer{};
+
+      auto write_result = glz::write_json(original, buffer);
+      expect(not write_result) << "write should succeed";
+
+      std::string_view json(buffer.data(), write_result.count);
+      ComplexStruct parsed{};
+      auto read_result = glz::read_json(parsed, json);
+      expect(not read_result) << "read should succeed";
+
+      expect(parsed.id == original.id) << "id should match";
+      expect(parsed.name == original.name) << "name should match";
+      expect(parsed.values == original.values) << "values should match";
+      expect(parsed.optional_field == original.optional_field) << "optional_field should match";
+      expect(parsed.active == original.active) << "active should match";
+   };
+
+   // Test #10: ec.count accuracy on overflow (more detailed)
+   "ec.count accurately reflects bytes written before overflow"_test = [] {
+      OverflowTest obj{};
+      // Add more data to ensure overflow
+      for (int i = 21; i < 200; ++i) {
+         obj.data.push_back(i);
+      }
+
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow";
+      expect(result.count > 0) << "count should be positive";
+      expect(result.count <= buffer.size()) << "count should not exceed buffer size";
+
+      // The partial output should start with {"a":1,"data":[
+      std::string_view partial(buffer.data(), result.count);
+      expect(partial.find("{\"a\":1") != std::string_view::npos) << "partial should contain start of object";
+   };
+
+   // Test: String with escape characters to bounded buffer
+   "string with escapes to bounded buffer"_test = [] {
+      std::string obj = "Hello \"World\"\nWith\tEscapes\\And\\More";
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "string with escapes should serialize successfully";
+      expect(result.count > 0) << "count should be non-zero";
+
+      // Verify round-trip
+      std::string_view json(buffer.data(), result.count);
+      std::string parsed;
+      auto read_result = glz::read_json(parsed, json);
+      expect(not read_result) << "read should succeed";
+      expect(parsed == obj) << "escaped string should round-trip correctly";
+   };
+
+   "long string with escapes overflows small buffer"_test = [] {
+      // Create a string with many escape characters
+      std::string obj;
+      for (int i = 0; i < 100; ++i) {
+         obj += "\"escape\"\t";
+      }
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "long escaped string should overflow";
+   };
+
+   // Test: Vector of strings to bounded buffer
+   "vector of strings to bounded buffer"_test = [] {
+      std::vector<std::string> obj{"hello", "world", "test", "strings"};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "vector of strings should serialize successfully";
+
+      std::string_view json(buffer.data(), result.count);
+      expect(json == R"(["hello","world","test","strings"])") << "should match expected JSON";
+
+      // Verify round-trip
+      std::vector<std::string> parsed;
+      auto read_result = glz::read_json(parsed, json);
+      expect(not read_result) << "read should succeed";
+      expect(parsed == obj) << "vector of strings should round-trip correctly";
+   };
+
+   "large vector of strings overflows"_test = [] {
+      std::vector<std::string> obj;
+      for (int i = 0; i < 100; ++i) {
+         obj.push_back("string_number_" + std::to_string(i));
+      }
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "large vector of strings should overflow";
+   };
+
+   // Test: Single character serialization
+   "single char to bounded buffer"_test = [] {
+      char obj = 'X';
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "single char should serialize successfully";
+
+      std::string_view json(buffer.data(), result.count);
+      expect(json == "\"X\"") << "should be quoted character";
+   };
+
+   "escaped char to bounded buffer"_test = [] {
+      char obj = '\n';
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "escaped char should serialize successfully";
+
+      std::string_view json(buffer.data(), result.count);
+      expect(json == "\"\\n\"") << "should be escaped newline";
+   };
+
+   // Test: Empty string edge case
+   "empty string to bounded buffer"_test = [] {
+      std::string obj;
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "empty string should serialize successfully";
+
+      std::string_view json(buffer.data(), result.count);
+      expect(json == "\"\"") << "should be empty quoted string";
+   };
+
+   // Test: Long string that causes overflow mid-serialization
+   "long string overflow detection"_test = [] {
+      // Create a string longer than the buffer
+      std::string obj(600, 'x');
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "long string should overflow";
    };
 };
 

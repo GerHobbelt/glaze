@@ -13,6 +13,7 @@
 
 #include "glaze/core/chrono.hpp"
 #include "glaze/core/common.hpp"
+#include "glaze/core/custom_meta.hpp"
 #include "glaze/core/opts.hpp"
 #include "glaze/core/read.hpp"
 #include "glaze/core/reflect.hpp"
@@ -35,6 +36,8 @@ namespace glz
    // forward declare from json/wrappers.hpp to avoid circular include
    template <class T>
    struct quoted_t;
+
+   // Note: custom_num_t, custom_str_t, custom_bool_t concepts are defined in core/custom_meta.hpp
 
    template <>
    struct parse<JSON>
@@ -211,6 +214,32 @@ namespace glz
       }
    }
 
+   // Linear search for key matching - eliminates hash tables for smaller binaries
+   // Returns the index of the matching key, or N if not found
+   // Advances it past the key and closing quote
+   template <class T>
+   GLZ_ALWAYS_INLINE size_t decode_linear(is_context auto&& ctx, auto&& it, auto&& end)
+   {
+      static constexpr auto N = reflect<T>::size;
+      static constexpr auto& keys = reflect<T>::keys;
+
+      auto key_start = it;
+      skip_string_view(ctx, it, end);
+      if (bool(ctx.error)) [[unlikely]]
+         return N;
+      const sv key{key_start, size_t(it - key_start)};
+      ++it; // skip closing quote
+
+      // Linear search through known keys
+      for (size_t i = 0; i < N; ++i) {
+         if (keys[i] == key) {
+            return i;
+         }
+      }
+
+      return N; // not found
+   }
+
    template <auto Opts, class T, size_t I, class Value, class... SelectedIndex>
       requires(glaze_object_t<T> || reflectable<T>)
    void decode_index(Value&& value, is_context auto&& ctx, auto&& it, auto&& end, SelectedIndex&&... selected_index)
@@ -332,20 +361,128 @@ namespace glz
       }
    }
 
-   template <auto Opts, class T, auto& HashInfo, class Value, class... SelectedIndex>
+   template <auto Opts, class T, class Value, class... SelectedIndex>
       requires(glaze_object_t<T> || reflectable<T>)
    GLZ_ALWAYS_INLINE constexpr void parse_and_invoke(Value&& value, is_context auto&& ctx, auto&& it, auto&& end,
                                                      SelectedIndex&&... selected_index)
    {
-      constexpr auto type = HashInfo.type;
       constexpr auto N = reflect<T>::size;
-
-      static_assert(bool(type), "invalid hash algorithm");
 
       if constexpr (N == 1) {
          decode_index<Opts, T, 0>(value, ctx, it, end, selected_index...);
       }
+      else if constexpr (check_linear_search(Opts)) {
+         // Linear search path
+         auto key_start = it;
+         const auto index = decode_linear<T>(ctx, it, end);
+         if (bool(ctx.error)) [[unlikely]]
+            return;
+
+         if (index >= N) [[unlikely]] {
+            if constexpr (Opts.error_on_unknown_keys) {
+               ctx.error = error_code::unknown_key;
+               return;
+            }
+            else {
+               const sv key{key_start, size_t(it - key_start - 1)};
+               if constexpr (not Opts.null_terminated) {
+                  if (it == end) [[unlikely]] {
+                     ctx.error = error_code::unexpected_end;
+                     return;
+                  }
+               }
+               if (parse_ws_colon<Opts>(ctx, it, end)) {
+                  return;
+               }
+               parse<JSON>::handle_unknown<Opts>(key, value, ctx, it, end);
+               return;
+            }
+         }
+
+         if constexpr (not Opts.null_terminated) {
+            if (it == end) [[unlikely]] {
+               ctx.error = error_code::unexpected_end;
+               return;
+            }
+         }
+         if (skip_ws<Opts>(ctx, it, end)) {
+            return;
+         }
+         if (match_invalid_end<':', Opts>(ctx, it, end)) {
+            return;
+         }
+         if (skip_ws<Opts>(ctx, it, end)) {
+            return;
+         }
+
+         // Fold expression dispatch - avoids jump table overhead for smaller binary size
+         auto parse_field = [&]<size_t I>() {
+            if constexpr (check_skip_null_members_on_read(Opts)) {
+               if (*it == 'n') {
+                  ++it;
+                  if constexpr (not Opts.null_terminated) {
+                     if (it == end) [[unlikely]] {
+                        ctx.error = error_code::unexpected_end;
+                        return;
+                     }
+                  }
+                  match<"ull", Opts>(ctx, it, end);
+                  if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+                     ((selected_index = I), ...);
+                  }
+                  return;
+               }
+            }
+
+            // Check for operation-specific skipping
+            if constexpr (meta_has_skip<std::remove_cvref_t<T>>) {
+               constexpr auto Key = get<I>(reflect<T>::keys);
+               if constexpr (meta<std::remove_cvref_t<T>>::skip(Key, {glz::operation::parse})) {
+                  skip_value<JSON>::op<Opts>(ctx, it, end);
+                  if (bool(ctx.error)) [[unlikely]]
+                     return;
+                  if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+                     ((selected_index = I), ...);
+                  }
+                  return;
+               }
+            }
+
+            using V = refl_t<T, I>;
+            if constexpr (const_value_v<V>) {
+               if constexpr (check_error_on_const_read(Opts)) {
+                  ctx.error = error_code::attempt_const_read;
+               }
+               else {
+                  skip_value<JSON>::op<Opts>(ctx, it, end);
+               }
+            }
+            else {
+               // For linear_search, use Opts directly to avoid duplicate template instantiations
+               // We've already skipped whitespace before reaching here
+               if constexpr (glaze_object_t<T>) {
+                  from<JSON, std::remove_cvref_t<V>>::template op<Opts>(get_member(value, get<I>(reflect<T>::values)),
+                                                                        ctx, it, end);
+               }
+               else {
+                  from<JSON, std::remove_cvref_t<V>>::template op<Opts>(get_member(value, get<I>(to_tie(value))), ctx,
+                                                                        it, end);
+               }
+            }
+            if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+               ((selected_index = I), ...);
+            }
+         };
+         [&]<size_t... Is>(std::index_sequence<Is...>) {
+            (void)(((index == Is ? (parse_field.template operator()<Is>(), true) : false) || ...));
+         }(std::make_index_sequence<N>{});
+      }
       else {
+         // Hash-based lookup
+         constexpr auto& HashInfo = hash_info<T>;
+         constexpr auto type = HashInfo.type;
+         static_assert(bool(type), "invalid hash algorithm");
+
          const auto index = decode_hash<JSON, T, HashInfo, HashInfo.type>::op(it, end);
 
          if (index >= N) [[unlikely]] {
@@ -354,7 +491,6 @@ namespace glz
                return;
             }
             else {
-               // we need to search until we find the ending quote of the key
                auto start = it;
                skip_string_view(ctx, it, end);
                if (bool(ctx.error)) [[unlikely]]
@@ -367,11 +503,9 @@ namespace glz
                      return;
                   }
                }
-
                if (parse_ws_colon<Opts>(ctx, it, end)) {
                   return;
                }
-
                parse<JSON>::handle_unknown<Opts>(key, value, ctx, it, end);
                return;
             }
@@ -703,6 +837,8 @@ namespace glz
             }
          }
          else {
+// float128_t requires std::from_chars for floating-point, unavailable on older Apple platforms (iOS < 16.3)
+#if !defined(_LIBCPP_VERSION) || defined(_LIBCPP_AVAILABILITY_HAS_TO_CHARS_FLOATING_POINT)
             if constexpr (is_float128<V>) {
                auto [ptr, ec] = std::from_chars(it, end, value);
                if (ec != std::errc()) {
@@ -711,7 +847,9 @@ namespace glz
                }
                it = ptr;
             }
-            else {
+            else
+#endif
+            {
                if constexpr (std::is_volatile_v<std::remove_reference_t<decltype(value)>>) {
                   // Hardware may interact with value changes, so we parse into a temporary and assign in one
                   // place
@@ -1819,6 +1957,22 @@ namespace glz
          if constexpr (N == 1) {
             decode_index<Opts, T, 0>(value, ctx, it, end);
          }
+         else if constexpr (check_linear_search(Opts)) {
+            // Linear search path for enums - decode_linear advances past closing quote
+            const auto index = decode_linear<T>(ctx, it, end);
+            if (bool(ctx.error)) [[unlikely]]
+               return;
+
+            if (index >= N) [[unlikely]] {
+               ctx.error = error_code::unexpected_enum;
+               return;
+            }
+
+            // Simply assign the enum value - fold expression dispatch
+            [&]<size_t... Is>(std::index_sequence<Is...>) {
+               (void)(((index == Is ? (value = get<Is>(reflect<T>::values), true) : false) || ...));
+            }(std::make_index_sequence<N>{});
+         }
          else {
             static constexpr auto HashInfo = hash_info<T>;
 
@@ -2070,6 +2224,25 @@ namespace glz
             // growing
             if constexpr (emplace_backable<T> || has_try_emplace_back<T>) {
                while (it < end) {
+                  // Streaming refill point: at start of each iteration, ensure buffer has data
+                  if constexpr (has_streaming_state<decltype(ctx)>) {
+                     if (ctx.stream.enabled()) {
+                        const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                        const size_t remaining = ctx.stream.size() - consumed;
+                        // Refill when less than half of buffer remains to ensure space for next element
+                        if (remaining <= ctx.stream.size() / 2 || it >= end) {
+                           const char* new_it;
+                           const char* new_end;
+                           ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                           it = new_it;
+                           end = new_end;
+                           if (it >= end && ctx.stream.at_eof()) {
+                              break; // No more data, exit loop normally
+                           }
+                        }
+                     }
+                  }
+
                   if constexpr (has_try_emplace_back<T>) {
                      if (value.try_emplace_back() != nullptr)
                         parse<JSON>::op<ws_handled<Opts>()>(value.back(), ctx, it, end);
@@ -2082,6 +2255,26 @@ namespace glz
 
                   if (bool(ctx.error)) [[unlikely]]
                      return;
+
+                  // Streaming refill point: after parsing each element, refill if buffer is low
+                  if constexpr (has_streaming_state<decltype(ctx)>) {
+                     if (ctx.stream.enabled()) {
+                        const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                        // Refill when less than 25% of buffer remains to ensure enough space for next element
+                        if (ctx.stream.size() - consumed <= ctx.stream.size() / 4 || it >= end) {
+                           const char* new_it;
+                           const char* new_end;
+                           ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                           it = new_it;
+                           end = new_end;
+                           if (it >= end && ctx.stream.at_eof()) {
+                              ctx.error = error_code::unexpected_end;
+                              return;
+                           }
+                        }
+                     }
+                  }
+
                   if (skip_ws<Opts>(ctx, it, end)) {
                      return;
                   }
@@ -2517,7 +2710,7 @@ namespace glz
             ctx.error = error_code::includer_error;
             auto& error_msg = error_buffer();
             error_msg = "file failed to open: " + string_file_path;
-            ctx.includer_error = error_msg;
+            ctx.custom_error_message = error_msg;
             return;
          }
 
@@ -2532,7 +2725,7 @@ namespace glz
             ctx.error = error_code::includer_error;
             auto& error_msg = error_buffer();
             error_msg = glz::format_error(ecode, nested_buffer);
-            ctx.includer_error = error_msg;
+            ctx.custom_error_message = error_msg;
             return;
          }
 
@@ -2775,6 +2968,26 @@ namespace glz
                   }
                }
 
+               // Streaming refill point: at start of each iteration, ensure buffer has data
+               if constexpr (has_streaming_state<decltype(ctx)>) {
+                  if (ctx.stream.enabled()) {
+                     const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                     const size_t remaining = ctx.stream.size() - consumed;
+                     // Refill when less than half of buffer remains to ensure space for next key-value pair
+                     if (remaining <= ctx.stream.size() / 2 || it >= end) {
+                        const char* new_it;
+                        const char* new_end;
+                        ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                        it = new_it;
+                        end = new_end;
+                        if (it >= end && ctx.stream.at_eof()) {
+                           ctx.error = error_code::unexpected_end;
+                           return;
+                        }
+                     }
+                  }
+               }
+
                if (*it == '}') {
                   if constexpr (not Opts.null_terminated) {
                      --ctx.indentation_level;
@@ -2871,6 +3084,20 @@ namespace glz
                         return;
                      }
 
+                     // Check if this key is the variant tag that should be skipped
+                     if constexpr (not tag.sv().empty()) {
+                        if (key == tag.sv()) {
+                           // Skip the tag value
+                           skip_value<JSON>::op<Opts>(ctx, it, end);
+                           if (bool(ctx.error)) [[unlikely]]
+                              return;
+                           if (skip_ws<Opts>(ctx, it, end)) {
+                              return;
+                           }
+                           continue;
+                        }
+                     }
+
                      parse<JSON>::handle_unknown<Opts>(key, value, ctx, it, end);
                      if (bool(ctx.error)) [[unlikely]]
                         return;
@@ -2879,6 +3106,9 @@ namespace glz
                            ctx.error = error_code::unexpected_end;
                            return;
                         }
+                     }
+                     if (skip_ws<Opts>(ctx, it, end)) {
+                        return;
                      }
                   }
                }
@@ -2935,7 +3165,7 @@ namespace glz
 
                   if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
                      size_t index = num_members;
-                     parse_and_invoke<Opts, T, hash_info<T>>(value, ctx, it, end, index);
+                     parse_and_invoke<Opts, T>(value, ctx, it, end, index);
                      if (bool(ctx.error)) [[unlikely]]
                         return;
                      if (index < num_members) {
@@ -2943,7 +3173,7 @@ namespace glz
                      }
                   }
                   else {
-                     parse_and_invoke<Opts, T, hash_info<T>>(value, ctx, it, end);
+                     parse_and_invoke<Opts, T>(value, ctx, it, end);
                      if (bool(ctx.error)) [[unlikely]]
                         return;
                   }
@@ -3035,6 +3265,26 @@ namespace glz
                         return;
                   }
                }
+
+               // Streaming refill point: after parsing each key-value pair, refill if buffer is low
+               if constexpr (has_streaming_state<decltype(ctx)>) {
+                  if (ctx.stream.enabled()) {
+                     const size_t consumed = static_cast<size_t>(it - ctx.stream.data());
+                     // Refill when less than 25% of buffer remains to ensure enough space for next element
+                     if (ctx.stream.size() - consumed <= ctx.stream.size() / 4 || it >= end) {
+                        const char* new_it;
+                        const char* new_end;
+                        ctx.stream.consume_and_refill(consumed, new_it, new_end);
+                        it = new_it;
+                        end = new_end;
+                        if (it >= end && ctx.stream.at_eof()) {
+                           ctx.error = error_code::unexpected_end;
+                           return;
+                        }
+                     }
+                  }
+               }
+
                if (skip_ws<Opts>(ctx, it, end)) {
                   return;
                }
@@ -3049,15 +3299,23 @@ namespace glz
       // Contains at most one each of the basic json types bool, numeric, string, object, array
       // If all objects are meta-objects then we can attempt to deduce them as well either through a type tag or
       // unique combinations of keys
+      // Also considers types with mimic declarations or custom read/write with inferable input types
       int bools{}, numbers{}, strings{}, objects{}, meta_objects{}, arrays{};
       constexpr auto N = std::variant_size_v<T>;
       for_each<N>([&]<auto I>() {
          using V = std::decay_t<std::variant_alternative_t<I, T>>;
-         // ICE workaround
-         bools += bool_t<V>;
-         numbers += num_t<V>;
-         strings += str_t<V>;
-         strings += glaze_enum_t<V>;
+         // Custom takes precedence over mimic (consistent with runtime behavior)
+         if constexpr (has_custom_meta_v<V>) {
+            bools += custom_bool_t<V>;
+            numbers += custom_num_t<V>;
+            strings += custom_str_t<V>;
+         }
+         else {
+            bools += bool_t<V> || mimics_bool_t<V>;
+            numbers += num_t<V> || mimics_num_t<V>;
+            strings += str_t<V> || mimics_str_t<V>;
+            strings += glaze_enum_t<V>;
+         }
          objects += pair_t<V>;
          objects += (writable_map_t<V> || readable_map_t<V> || is_memory_object<V>);
          objects += glaze_object_t<V>;
@@ -3069,162 +3327,202 @@ namespace glz
       return bools < 2 && numbers < 2 && strings < 2 && (objects < 2 || meta_objects == objects) && arrays < 2;
    }
 
-   template <class>
-   struct variant_types;
+   // ============================================================================
+   // Variant type category traits (index-based, avoids expensive tuple_cat)
+   // ============================================================================
 
-   template <class... Ts>
-   struct variant_types<std::variant<Ts...>>
+   // Concepts for variant type classification
+   template <class T>
+   concept variant_bool_type = bool_t<remove_meta_wrapper_t<T>> || mimics_bool_t<T> || custom_bool_t<T>;
+
+   template <class T>
+   concept variant_num_type = num_t<remove_meta_wrapper_t<T>> || mimics_num_t<T> || custom_num_t<T>;
+
+   template <class T>
+   concept variant_str_type = str_t<remove_meta_wrapper_t<T>> || glaze_enum_t<remove_meta_wrapper_t<T>> ||
+                              glaze_enum_t<T> || mimics_str_t<T> || custom_str_t<T>;
+
+   template <class T>
+   concept variant_object_type = json_object<T>;
+
+   template <class T>
+   concept variant_array_type = array_t<remove_meta_wrapper_t<T>> || glaze_array_t<T> || tuple_t<T> || is_std_tuple<T>;
+
+   template <class T>
+   concept variant_null_type = null_t<T>;
+
+   template <class T>
+   concept variant_nullable_object_type = is_memory_object<T>;
+
+   // Type traits wrapping concepts for template template parameter use
+   template <class T>
+   struct is_variant_bool : std::bool_constant<variant_bool_type<T>>
+   {};
+   template <class T>
+   struct is_variant_num : std::bool_constant<variant_num_type<T>>
+   {};
+   template <class T>
+   struct is_variant_str : std::bool_constant<variant_str_type<T>>
+   {};
+   template <class T>
+   struct is_variant_object : std::bool_constant<variant_object_type<T>>
+   {};
+   template <class T>
+   struct is_variant_array : std::bool_constant<variant_array_type<T>>
+   {};
+   template <class T>
+   struct is_variant_null : std::bool_constant<variant_null_type<T>>
+   {};
+   template <class T>
+   struct is_variant_nullable_object : std::bool_constant<variant_nullable_object_type<T>>
+   {};
+
+   // Count types in variant matching a trait (fold expression, very fast to compile)
+   template <class Variant, template <class> class Trait>
+   constexpr size_t variant_count_v = []<class... Ts>(std::variant<Ts...>*) {
+      return (size_t(Trait<Ts>::value) + ... + 0);
+   }(static_cast<Variant*>(nullptr));
+
+   // Get first index matching trait (or variant_npos if none)
+   template <class Variant, template <class> class Trait>
+   constexpr size_t variant_first_index_v =
+      []<class... Ts, size_t... Is>(std::variant<Ts...>*, std::index_sequence<Is...>) {
+         size_t result = std::variant_npos;
+         // Short-circuit: stops at first match via || fold
+         (void)((Trait<Ts>::value && result == std::variant_npos ? (result = Is, true) : false) || ...);
+         return result;
+      }(static_cast<Variant*>(nullptr), std::make_index_sequence<std::variant_size_v<Variant>>{});
+
+   // Count types matching both category trait AND const/non-const filter
+   template <class Variant, template <class> class Trait, bool IsConst>
+   constexpr size_t variant_filtered_count_v = []<class... Ts>(std::variant<Ts...>*) {
+      return (size_t(Trait<Ts>::value && (glaze_const_value_t<Ts> == IsConst)) + ... + 0);
+   }(static_cast<Variant*>(nullptr));
+
+   // Variant type counts using fold expressions (replaces tuple-based variant_type_count)
+   template <class T>
+   struct variant_type_count
    {
-      // TODO: this way of filtering types is compile time intensive.
-      using bool_types =
-         decltype(tuplet::tuple_cat(std::conditional_t<bool_t<remove_meta_wrapper_t<Ts>>, tuple<Ts>, tuple<>>{}...));
-      using number_types =
-         decltype(tuplet::tuple_cat(std::conditional_t<num_t<remove_meta_wrapper_t<Ts>>, tuple<Ts>, tuple<>>{}...));
-      using string_types = decltype(tuplet::tuple_cat( // glaze_enum_t remove_meta_wrapper_t supports constexpr
-                                                       // types while the other supports non const
-         std::conditional_t < str_t<remove_meta_wrapper_t<Ts>> || glaze_enum_t<remove_meta_wrapper_t<Ts>> ||
-            glaze_enum_t<Ts>,
-         tuple<Ts>, tuple < >> {}...));
-      using object_types = decltype(tuplet::tuple_cat(std::conditional_t<json_object<Ts>, tuple<Ts>, tuple<>>{}...));
-      using array_types = decltype(tuplet::tuple_cat(std::conditional_t < array_t<remove_meta_wrapper_t<Ts>> ||
-                                                        glaze_array_t<Ts> || tuple_t<Ts> || is_std_tuple<Ts>,
-                                                     tuple<Ts>, tuple < >> {}...));
-      using nullable_types = decltype(tuplet::tuple_cat(std::conditional_t<null_t<Ts>, tuple<Ts>, tuple<>>{}...));
-      using nullable_objects =
-         decltype(tuplet::tuple_cat(std::conditional_t<is_memory_object<Ts>, tuple<Ts>, tuple<>>{}...));
+      static constexpr auto n_bool = variant_count_v<T, is_variant_bool>;
+      static constexpr auto n_number = variant_count_v<T, is_variant_num>;
+      static constexpr auto n_string = variant_count_v<T, is_variant_str>;
+      static constexpr auto n_nullable_object = variant_count_v<T, is_variant_nullable_object>;
+      static constexpr auto n_object = variant_count_v<T, is_variant_object> + n_nullable_object;
+      static constexpr auto n_array = variant_count_v<T, is_variant_array>;
+      static constexpr auto n_null = variant_count_v<T, is_variant_null>;
    };
 
-   // post process output of variant_types
-   template <class>
-   struct tuple_types;
-
-   template <class... Ts>
-   struct tuple_types<tuple<Ts...>>
-   {
-      using glaze_const_types =
-         decltype(tuplet::tuple_cat(std::conditional_t<glaze_const_value_t<Ts>, tuple<Ts>, tuple<>>{}...));
-      using glaze_non_const_types =
-         decltype(tuplet::tuple_cat(std::conditional_t<!glaze_const_value_t<Ts>, tuple<Ts>, tuple<>>{}...));
-   };
-
-   template <class>
-   struct variant_type_count;
-
-   template <class... Ts>
-   struct variant_type_count<std::variant<Ts...>>
-   {
-      using V = variant_types<std::variant<Ts...>>;
-      static constexpr auto n_bool = glz::tuple_size_v<typename V::bool_types>;
-      static constexpr auto n_number = glz::tuple_size_v<typename V::number_types>;
-      static constexpr auto n_string = glz::tuple_size_v<typename V::string_types>;
-      static constexpr auto n_nullable_object = glz::tuple_size_v<typename V::nullable_objects>;
-      static constexpr auto n_object = glz::tuple_size_v<typename V::object_types> + n_nullable_object;
-      static constexpr auto n_array = glz::tuple_size_v<typename V::array_types>;
-      static constexpr auto n_null = glz::tuple_size_v<typename V::nullable_types>;
-   };
-
-   template <class Tuple>
+   // Process variant alternatives by iterating directly over variant indices
+   // (replaces tuple_cat + tuple iteration approach)
+   template <class Variant, template <class> class Trait>
    struct process_variant_alternatives
    {
       template <auto Options>
       static void op(auto&& value, is_context auto&& ctx, auto&& it, auto end)
       {
-         if constexpr (glz::tuple_size_v<Tuple> < 1) {
+         constexpr auto category_count = variant_count_v<Variant, Trait>;
+
+         if constexpr (category_count == 0) {
             ctx.error = error_code::no_matching_variant_type;
          }
          else {
-            using const_glaze_types = typename tuple_types<Tuple>::glaze_const_types;
-            bool found_match{};
-            for_each<glz::tuple_size_v<const_glaze_types>>([&]<size_t I>() {
-               if (found_match) {
-                  return;
-               }
-               using V = glz::tuple_element_t<I, const_glaze_types>;
-               // run time substitute to compare to const value
-               std::remove_const_t<std::remove_pointer_t<std::remove_const_t<meta_wrapper_t<V>>>> substitute{};
-               auto copy_it{it};
-               parse<JSON>::op<ws_handled<Options>()>(substitute, ctx, it, end);
-               static constexpr auto const_value{*meta_wrapper_v<V>};
-               if (substitute == const_value) {
-                  found_match = true;
-                  if (!std::holds_alternative<V>(value)) {
-                     value = V{};
-                  }
-               }
-               else {
-                  if constexpr (not Options.null_terminated) {
-                     if (ctx.error == error_code::end_reached) {
-                        // reset the context for next attempt
-                        ctx.error = error_code::none;
-                     }
-                  }
-                  it = copy_it;
-               }
-            });
-            if (found_match) {
-               return;
-            }
+            constexpr auto N = std::variant_size_v<Variant>;
+            constexpr auto const_count = variant_filtered_count_v<Variant, Trait, true>;
+            constexpr auto non_const_count = variant_filtered_count_v<Variant, Trait, false>;
 
-            using non_const_types = typename tuple_types<Tuple>::glaze_non_const_types;
-            if constexpr (glz::tuple_size_v<non_const_types> > 0) {
-               bool found_match{};
-               for_each<glz::tuple_size_v<non_const_types>>([&]<size_t I>() {
+            bool found_match{};
+
+            // First pass: const glaze types in this category
+            if constexpr (const_count > 0) {
+               for_each<N>([&]<size_t I>() {
                   if (found_match) {
                      return;
                   }
-                  using V = glz::tuple_element_t<I, non_const_types>;
-                  auto copy_it{it};
-                  if (!std::holds_alternative<V>(value)) {
-                     value = V{};
+                  using V = std::variant_alternative_t<I, Variant>;
+                  if constexpr (Trait<V>::value && glaze_const_value_t<V>) {
+                     // run time substitute to compare to const value
+                     std::remove_const_t<std::remove_pointer_t<std::remove_const_t<meta_wrapper_t<V>>>> substitute{};
+                     auto copy_it{it};
+                     parse<JSON>::op<ws_handled<Options>()>(substitute, ctx, it, end);
+                     static constexpr auto const_value{*meta_wrapper_v<V>};
+                     if (substitute == const_value) {
+                        found_match = true;
+                        if (!std::holds_alternative<V>(value)) {
+                           value = V{};
+                        }
+                     }
+                     else {
+                        if constexpr (not Options.null_terminated) {
+                           if (ctx.error == error_code::end_reached) {
+                              ctx.error = error_code::none;
+                           }
+                        }
+                        it = copy_it;
+                     }
                   }
-                  parse<JSON>::op<ws_handled<Options>()>(std::get<V>(value), ctx, it, end);
-                  if (!bool(ctx.error)) {
-                     found_match = true;
-                  }
-                  else if constexpr (not Options.null_terminated) {
-                     // Special handling for types that can validly end at buffer boundary in non-null-terminated mode
-                     // Use Glaze concepts to allow user-defined types
-                     constexpr bool is_complete_type =
-                        num_t<V> || bool_t<V> || string_t<V> || std::is_enum_v<V> || tuple_t<V> || is_std_tuple<V>;
+               });
+               if (found_match) {
+                  return;
+               }
+            }
 
-                     if constexpr (is_complete_type) {
-                        // For these types, end_reached after parsing is OK
-                        if (ctx.error == error_code::end_reached && it > copy_it) {
-                           found_match = true;
-                           ctx.error = error_code::none;
+            // Second pass: non-const types in this category
+            if constexpr (non_const_count > 0) {
+               // Track position within matching types for "is last" check.
+               // We iterate over all variant indices but only process matching types,
+               // so we need runtime tracking (vs the old tuple-based approach where
+               // the loop index directly corresponded to position in filtered set).
+               // This has negligible cost: one increment per matching type.
+               size_t non_const_idx = 0;
+
+               for_each<N>([&]<size_t I>() {
+                  if (found_match) {
+                     return;
+                  }
+                  using V = std::variant_alternative_t<I, Variant>;
+                  if constexpr (Trait<V>::value && !glaze_const_value_t<V>) {
+                     auto copy_it{it};
+                     if (!std::holds_alternative<V>(value)) {
+                        value = V{};
+                     }
+                     parse<JSON>::op<ws_handled<Options>()>(std::get<V>(value), ctx, it, end);
+                     if (!bool(ctx.error)) {
+                        found_match = true;
+                     }
+                     else if constexpr (not Options.null_terminated) {
+                        constexpr bool is_complete_type =
+                           num_t<V> || bool_t<V> || string_t<V> || std::is_enum_v<V> || tuple_t<V> || is_std_tuple<V>;
+
+                        if constexpr (is_complete_type) {
+                           if (ctx.error == error_code::end_reached && it > copy_it) {
+                              found_match = true;
+                              ctx.error = error_code::none;
+                           }
+                           else {
+                              it = copy_it;
+                              if (non_const_idx + 1 < non_const_count) {
+                                 ctx.error = error_code::none;
+                              }
+                           }
                         }
                         else {
-                           // Reset iterator for next attempt
                            it = copy_it;
-                           // Reset error to try next type (unless we're at the last type)
-                           if constexpr (I + 1 < glz::tuple_size_v<non_const_types>) {
+                           if (non_const_idx + 1 < non_const_count) {
                               ctx.error = error_code::none;
                            }
                         }
                      }
                      else {
-                        // For container types, end_reached is a real error
-                        // Reset iterator for next attempt
                         it = copy_it;
-                        // Reset error to try next type (unless we're at the last type)
-                        if constexpr (I + 1 < glz::tuple_size_v<non_const_types>) {
+                        if (non_const_idx + 1 < non_const_count) {
                            ctx.error = error_code::none;
                         }
                      }
-                  }
-                  else {
-                     // Reset iterator for next attempt
-                     it = copy_it;
-                     // Reset error to try next type (unless we're at the last type)
-                     if constexpr (I + 1 < glz::tuple_size_v<non_const_types>) {
-                        ctx.error = error_code::none;
-                     }
+                     ++non_const_idx;
                   }
                });
                if (!found_match) {
-                  // If we only tried one type and it failed with a specific error, preserve that error
-                  // Otherwise, use the generic no_matching_variant_type
-                  if constexpr (glz::tuple_size_v<non_const_types> == 1) {
+                  if constexpr (non_const_count == 1) {
                      // Keep the specific error from the single type we tried
                   }
                   else {
@@ -3275,14 +3573,14 @@ namespace glz
                   }
                }
                using type_counts = variant_type_count<T>;
-               using object_types = typename variant_types<T>::object_types;
                if constexpr ((type_counts::n_object < 1) //
                              && (type_counts::n_nullable_object < 1)) {
                   ctx.error = error_code::no_matching_variant_type;
                   return;
                }
                else if constexpr ((type_counts::n_object + type_counts::n_nullable_object) == 1 && tag_v<T>.empty()) {
-                  using V = glz::tuple_element_t<0, object_types>;
+                  constexpr auto first_idx = variant_first_index_v<T, is_variant_object>;
+                  using V = std::variant_alternative_t<first_idx, T>;
                   if (!std::holds_alternative<V>(value)) value = V{};
                   parse<JSON>::op<opening_handled<Opts>()>(std::get<V>(value), ctx, it, end);
                   if constexpr (Opts.null_terminated) {
@@ -3405,6 +3703,13 @@ namespace glz
                                              else if constexpr (constructible<V>) {
                                                 v = meta_construct_v<V>();
                                              }
+                                             else if constexpr (std::is_pointer_v<V> &&
+                                                                can_allocate_raw_pointer<Opts,
+                                                                                         std::decay_t<decltype(ctx)>>) {
+                                                if (!try_allocate_raw_pointer<Opts>(v, ctx)) {
+                                                   return;
+                                                }
+                                             }
                                              else {
                                                 ctx.error = error_code::invalid_nullable_read;
                                                 return;
@@ -3459,6 +3764,13 @@ namespace glz
                                                    v = std::make_shared<typename V::element_type>();
                                                 else if constexpr (constructible<V>) {
                                                    v = meta_construct_v<V>();
+                                                }
+                                                else if constexpr (std::is_pointer_v<V> &&
+                                                                   can_allocate_raw_pointer<
+                                                                      Opts, std::decay_t<decltype(ctx)>>) {
+                                                   if (!try_allocate_raw_pointer<Opts>(v, ctx)) {
+                                                      return;
+                                                   }
                                                 }
                                                 else {
                                                    ctx.error = error_code::invalid_nullable_read;
@@ -3520,7 +3832,6 @@ namespace glz
                               it = start;
                               tag_specified_index = type_index; // Store the tag-specified type
                               if (value.index() != type_index) emplace_runtime_variant(value, type_index);
-                              return;
                            }
                            else {
                               // Check if we have a default type (ids array shorter than variant)
@@ -3532,17 +3843,40 @@ namespace glz
                                  const auto default_index = ids_size;
                                  tag_specified_index = default_index; // Store the default type index
                                  if (value.index() != default_index) emplace_runtime_variant(value, default_index);
-                                 return;
                               }
                               else {
                                  ctx.error = error_code::no_matching_variant_type;
                                  return;
                               }
                            }
+                           // Parse the empty type (handles tag skipping and unknown keys)
+                           std::visit(
+                              [&](auto&& v) {
+                                 using V = std::decay_t<decltype(v)>;
+                                 from<JSON, V>::template op<opening_handled<Opts>(), tag_literal>(v, ctx, it, end);
+                              },
+                              value);
+                           if constexpr (Opts.null_terminated) {
+                              --ctx.indentation_level;
+                           }
+                           return;
                         }
                         else if constexpr (Opts.error_on_unknown_keys) {
                            ctx.error = error_code::unknown_key;
                            return;
+                        }
+                        else {
+                           // Skip unknown key's value (non-tag key in empty variant)
+                           if (parse_ws_colon<Opts>(ctx, it, end)) {
+                              return;
+                           }
+                           skip_value<JSON>::op<Opts>(ctx, it, end);
+                           if (bool(ctx.error)) [[unlikely]]
+                              return;
+                           if (skip_ws<Opts>(ctx, it, end)) {
+                              return;
+                           }
+                           continue; // Continue loop to find the tag
                         }
                      }
                      else if constexpr (Opts.error_on_unknown_keys) {
@@ -3586,6 +3920,12 @@ namespace glz
                                           v = std::make_shared<typename V::element_type>();
                                        else if constexpr (constructible<V>) {
                                           v = meta_construct_v<V>();
+                                       }
+                                       else if constexpr (std::is_pointer_v<V> &&
+                                                          can_allocate_raw_pointer<Opts, std::decay_t<decltype(ctx)>>) {
+                                          if (!try_allocate_raw_pointer<Opts>(v, ctx)) {
+                                             return;
+                                          }
                                        }
                                        else {
                                           ctx.error = error_code::invalid_nullable_read;
@@ -3665,6 +4005,12 @@ namespace glz
                                        v = std::make_shared<typename V::element_type>();
                                     else if constexpr (constructible<V>) {
                                        v = meta_construct_v<V>();
+                                    }
+                                    else if constexpr (std::is_pointer_v<V> &&
+                                                       can_allocate_raw_pointer<Opts, std::decay_t<decltype(ctx)>>) {
+                                       if (!try_allocate_raw_pointer<Opts>(v, ctx)) {
+                                          return;
+                                       }
                                     }
                                     else {
                                        ctx.error = error_code::invalid_nullable_read;
@@ -3752,6 +4098,12 @@ namespace glz
                                        else if constexpr (constructible<V>) {
                                           v = meta_construct_v<V>();
                                        }
+                                       else if constexpr (std::is_pointer_v<V> &&
+                                                          can_allocate_raw_pointer<Opts, std::decay_t<decltype(ctx)>>) {
+                                          if (!try_allocate_raw_pointer<Opts>(v, ctx)) {
+                                             return;
+                                          }
+                                       }
                                        else {
                                           ctx.error = error_code::invalid_nullable_read;
                                           return;
@@ -3779,8 +4131,6 @@ namespace glz
                }
                break;
             case '[':
-               using array_types = typename variant_types<T>::array_types;
-
                if (ctx.indentation_level >= max_recursive_depth_limit) {
                   ctx.error = error_code::exceeded_max_recursive_depth;
                   return;
@@ -3790,37 +4140,34 @@ namespace glz
                   // Depth counting is done at the object level when not null terminated
                   ++ctx.indentation_level;
                }
-               process_variant_alternatives<array_types>::template op<Opts>(value, ctx, it, end);
+               process_variant_alternatives<T, is_variant_array>::template op<Opts>(value, ctx, it, end);
                if constexpr (Opts.null_terminated) {
                   --ctx.indentation_level;
                }
                break;
             case '"': {
-               using string_types = typename variant_types<T>::string_types;
-               process_variant_alternatives<string_types>::template op<Opts>(value, ctx, it, end);
+               process_variant_alternatives<T, is_variant_str>::template op<Opts>(value, ctx, it, end);
                break;
             }
             case 't':
             case 'f': {
-               using bool_types = typename variant_types<T>::bool_types;
-               process_variant_alternatives<bool_types>::template op<Opts>(value, ctx, it, end);
+               process_variant_alternatives<T, is_variant_bool>::template op<Opts>(value, ctx, it, end);
                break;
             }
             case 'n':
-               using nullable_types = typename variant_types<T>::nullable_types;
-               if constexpr (glz::tuple_size_v<nullable_types> < 1) {
+               if constexpr (variant_count_v<T, is_variant_null> == 0) {
                   ctx.error = error_code::no_matching_variant_type;
                }
                else {
-                  using V = glz::tuple_element_t<0, nullable_types>;
+                  constexpr auto first_idx = variant_first_index_v<T, is_variant_null>;
+                  using V = std::variant_alternative_t<first_idx, T>;
                   if (!std::holds_alternative<V>(value)) value = V{};
                   match<"null", Opts>(ctx, it, end);
                }
                break;
             default: {
                // Not bool, string, object, or array so must be number or null
-               using number_types = typename variant_types<T>::number_types;
-               process_variant_alternatives<number_types>::template op<Opts>(value, ctx, it, end);
+               process_variant_alternatives<T, is_variant_num>::template op<Opts>(value, ctx, it, end);
             }
             }
          }
@@ -4119,6 +4466,12 @@ namespace glz
                   else if constexpr (constructible<T>) {
                      value = meta_construct_v<T>();
                   }
+                  else if constexpr (std::is_pointer_v<T> &&
+                                     can_allocate_raw_pointer<Opts, std::decay_t<decltype(ctx)>>) {
+                     if (!try_allocate_raw_pointer<Opts>(value, ctx)) {
+                        return;
+                     }
+                  }
                   else {
                      // Cannot read into a null raw pointer
                      ctx.error = error_code::invalid_nullable_read;
@@ -4383,18 +4736,41 @@ namespace glz
    }
 
    template <read_supported<JSON> T, is_buffer Buffer>
+      requires(!is_input_streaming<std::remove_reference_t<Buffer>>)
    [[nodiscard]] error_ctx read_json(T& value, Buffer&& buffer)
    {
       context ctx{};
       return read<opts{}>(value, std::forward<Buffer>(buffer), ctx);
    }
 
+   // Overload for streaming input buffers (istream_buffer)
+   template <read_supported<JSON> T, class Buffer>
+      requires is_input_streaming<std::remove_reference_t<Buffer>>
+   [[nodiscard]] error_ctx read_json(T& value, Buffer&& buffer)
+   {
+      return read_streaming<opts{}>(value, std::forward<Buffer>(buffer));
+   }
+
    template <read_supported<JSON> T, is_buffer Buffer>
+      requires(!is_input_streaming<std::remove_reference_t<Buffer>>)
    [[nodiscard]] expected<T, error_ctx> read_json(Buffer&& buffer)
    {
       T value{};
       context ctx{};
       const error_ctx ec = read<opts{}>(value, std::forward<Buffer>(buffer), ctx);
+      if (ec) {
+         return unexpected<error_ctx>(ec);
+      }
+      return value;
+   }
+
+   // Overload for streaming input buffers (istream_buffer)
+   template <read_supported<JSON> T, class Buffer>
+      requires is_input_streaming<std::remove_reference_t<Buffer>>
+   [[nodiscard]] expected<T, error_ctx> read_json(Buffer&& buffer)
+   {
+      T value{};
+      const error_ctx ec = read_streaming<opts{}>(value, std::forward<Buffer>(buffer));
       if (ec) {
          return unexpected<error_ctx>(ec);
       }
@@ -4429,7 +4805,7 @@ namespace glz
       const auto ec = file_to_buffer(buffer, ctx.current_file);
 
       if (bool(ec)) {
-         return {ec};
+         return {0, ec};
       }
 
       return read<set_json<Opts>()>(value, buffer, ctx);
@@ -4444,7 +4820,7 @@ namespace glz
       const auto ec = file_to_buffer(buffer, ctx.current_file);
 
       if (bool(ec)) {
-         return {ec};
+         return {0, ec};
       }
 
       constexpr auto Options = opt_true<set_json<Opts>(), &opts::comments>;

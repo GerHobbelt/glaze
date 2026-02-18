@@ -244,6 +244,7 @@ namespace glz
    };
 
    template <nullable_like T>
+      requires(!std::is_pointer_v<T>)
    struct from<MSGPACK, T>
    {
       template <auto Opts, class Value, is_context Ctx, class It, class End>
@@ -257,6 +258,33 @@ namespace glz
             value.emplace();
          }
          from<MSGPACK, std::remove_cvref_t<decltype(*value)>>::template op<Opts>(*value, tag, ctx, it, end);
+      }
+   };
+
+   // Raw pointer support
+   template <class T>
+      requires(std::is_pointer_v<T> && !std::is_array_v<T>)
+   struct from<MSGPACK, T>
+   {
+      template <auto Opts, class Value, is_context Ctx, class It, class End>
+      GLZ_ALWAYS_INLINE static void op(Value&& value, uint8_t tag, Ctx&& ctx, It& it, const End& end) noexcept
+      {
+         if (tag == msgpack::nil) {
+            // null pointer - do nothing (can't reset a raw pointer safely)
+            return;
+         }
+         if (!value) {
+            if constexpr (can_allocate_raw_pointer<Opts, std::decay_t<Ctx>>) {
+               if (!try_allocate_raw_pointer<Opts>(value, ctx)) {
+                  return;
+               }
+            }
+            else {
+               ctx.error = error_code::invalid_nullable_read;
+               return;
+            }
+         }
+         from<MSGPACK, std::remove_pointer_t<std::remove_cvref_t<Value>>>::template op<Opts>(*value, tag, ctx, it, end);
       }
    };
 
@@ -576,7 +604,7 @@ namespace glz
             }();
 
             auto fields = [&]() -> decltype(auto) {
-               if constexpr (Opts.partial_read) {
+               if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
                   return bit_array<N>{};
                }
                else {
@@ -619,7 +647,7 @@ namespace glz
                      }
                      else {
                         parse<MSGPACK>::template op<Opts>(get_member(value, get<I>(reflect<T>::values)), ctx, it, end);
-                        if constexpr (Opts.partial_read) {
+                        if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
                            fields[I] = true;
                         }
                      }
@@ -634,6 +662,20 @@ namespace glz
                      ctx.error = error_code::partial_read_complete;
                      return;
                   }
+               }
+            }
+
+            if constexpr (Opts.error_on_missing_keys) {
+               constexpr auto req_fields = required_fields<T, Opts>();
+               if ((req_fields & fields) != req_fields) {
+                  for (size_t i = 0; i < N; ++i) {
+                     if (not fields[i] && req_fields[i]) {
+                        ctx.custom_error_message = reflect<T>::keys[i];
+                        break;
+                     }
+                  }
+                  ctx.error = error_code::missing_key;
+                  return;
                }
             }
          }
@@ -1173,7 +1215,7 @@ namespace glz
       const auto file_error = file_to_buffer(buffer, ctx.current_file);
 
       if (bool(file_error)) [[unlikely]] {
-         return error_ctx{file_error};
+         return error_ctx{0, file_error};
       }
 
       return read<set_msgpack<Opts>()>(value, buffer, ctx);

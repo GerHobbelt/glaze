@@ -11,6 +11,7 @@
 #include <numbers>
 #include <random>
 #include <set>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -18,7 +19,9 @@
 #include "glaze/base64/base64.hpp"
 #include "glaze/beve/beve_to_json.hpp"
 #include "glaze/beve/key_traits.hpp"
+#include "glaze/beve/peek_header.hpp"
 #include "glaze/beve/read.hpp"
+#include "glaze/beve/size.hpp"
 #include "glaze/beve/write.hpp"
 #include "glaze/hardware/volatile_array.hpp"
 #include "glaze/json/json_ptr.hpp"
@@ -567,9 +570,9 @@ void write_tests()
       std::array<test_skip, 2> b{{{false}, {true}}};
       auto beve_b{b};
 
-      json_err = glz::read_json(b, json_buffer);
-      beve_err = glz::read_beve(beve_b, beve_buffer);
-      expect(!json_err && !beve_err);
+      auto json_err2 = glz::read_json(b, json_buffer);
+      auto beve_err2 = glz::read_beve(beve_b, beve_buffer);
+      expect(!json_err2 && !beve_err2);
 
       // Both should handle empty optionals the same way
       expect(b[0].o_ == beve_b[0].o_);
@@ -601,9 +604,9 @@ void write_tests()
          beve_obj1.nested.inner_opt1 = 9999;
          beve_obj1.nested.inner_opt2 = 99.99;
 
-         json_err = glz::read_json(json_obj1, json_buffer);
-         beve_err = glz::read_beve(beve_obj1, beve_buffer);
-         expect(!json_err && !beve_err);
+         auto json_err2 = glz::read_json(json_obj1, json_buffer);
+         auto beve_err2 = glz::read_beve(beve_obj1, beve_buffer);
+         expect(!json_err2 && !beve_err2);
 
          // Verify both formats skip null members the same way - sentinel values should remain
          expect(json_obj1.outer_opt1 == beve_obj1.outer_opt1);
@@ -649,9 +652,9 @@ void write_tests()
          beve_obj2.nested.inner_opt1 = 7777;
          beve_obj2.nested.inner_opt2 = 77.77; // Sentinel - should not change
 
-         json_err = glz::read_json(json_obj2, json_buffer);
-         beve_err = glz::read_beve(beve_obj2, beve_buffer);
-         expect(!json_err && !beve_err);
+         auto json_err2 = glz::read_json(json_obj2, json_buffer);
+         auto beve_err2 = glz::read_beve(beve_obj2, beve_buffer);
+         expect(!json_err2 && !beve_err2);
 
          // Verify written values were updated
          expect(json_obj2.outer_opt1 == beve_obj2.outer_opt1);
@@ -694,9 +697,9 @@ void write_tests()
          beve_obj3.nested.inner_opt1 = 5555;
          beve_obj3.nested.inner_opt2 = 55.55;
 
-         json_err = glz::read_json(json_obj3, json_buffer);
-         beve_err = glz::read_beve(beve_obj3, beve_buffer);
-         expect(!json_err && !beve_err);
+         auto json_err2 = glz::read_json(json_obj3, json_buffer);
+         auto beve_err2 = glz::read_beve(beve_obj3, beve_buffer);
+         expect(!json_err2 && !beve_err2);
 
          // Verify all values were replaced with the serialized values
          expect(json_obj3.outer_opt1 == beve_obj3.outer_opt1);
@@ -1841,11 +1844,25 @@ suite example_reflection_without_keys_test = [] {
       expect(without_keys != with_keys);
 
       obj = {};
-      expect(!glz::read_binary_untagged(obj, without_keys));
+      expect(!glz::read_beve_untagged(obj, without_keys));
 
       expect(obj.i == 55);
       expect(obj.d == 3.14);
       expect(obj.hello == "happy");
+   };
+
+   "read_beve_untagged"_test = [] {
+      my_example obj{.i = 42, .d = 2.718, .hello = "world"};
+      auto encoded = glz::write_beve_untagged(obj);
+      expect(encoded.has_value());
+
+      my_example decoded{};
+      auto ec = glz::read_beve_untagged(decoded, *encoded);
+      expect(!ec);
+
+      expect(decoded.i == 42);
+      expect(decoded.d == 2.718);
+      expect(decoded.hello == "world");
    };
 };
 
@@ -2648,13 +2665,13 @@ suite early_end = [] {
          // This is mainly to check if all our end checks are in place.
          auto ec = glz::read_beve(obj, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read_beve(json, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read_beve(skip_me, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
       }
    };
 
@@ -2673,13 +2690,13 @@ suite early_end = [] {
          // This is mainly to check if all our end checks are in place.
          auto ec = glz::read<options>(obj, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read<options>(json, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
          ec = glz::read<options>(skip_me, buffer);
          expect(ec);
-         expect(ec.location <= buffer.size());
+         expect(ec.count <= buffer.size());
       }
    };
 };
@@ -3028,7 +3045,7 @@ suite static_variant_tags = [] {
          auto encoded = glz::write_beve_untagged(original);
          expect(encoded.has_value());
 
-         auto decoded = glz::read_binary_untagged<MsgEmpty>(*encoded);
+         auto decoded = glz::read_beve_untagged<MsgEmpty>(*encoded);
          expect(decoded.has_value());
          expect(decoded->index() == 0);
       }
@@ -3038,7 +3055,7 @@ suite static_variant_tags = [] {
          auto encoded = glz::write_beve_untagged(original);
          expect(encoded.has_value());
 
-         auto decoded = glz::read_binary_untagged<MsgEmpty>(*encoded);
+         auto decoded = glz::read_beve_untagged<MsgEmpty>(*encoded);
          expect(decoded.has_value());
          expect(decoded->index() == 1);
       }
@@ -3053,7 +3070,7 @@ suite static_variant_tags = [] {
          auto encoded = glz::write_beve_untagged(original);
          expect(encoded.has_value());
 
-         auto decoded = glz::read_binary_untagged<Msg>(*encoded);
+         auto decoded = glz::read_beve_untagged<Msg>(*encoded);
          expect(decoded.has_value());
          expect(decoded->index() == 0);
          expect(std::get<0>(*decoded).value == 42);
@@ -3064,7 +3081,7 @@ suite static_variant_tags = [] {
          auto encoded = glz::write_beve_untagged(original);
          expect(encoded.has_value());
 
-         auto decoded = glz::read_binary_untagged<Msg>(*encoded);
+         auto decoded = glz::read_beve_untagged<Msg>(*encoded);
          expect(decoded.has_value());
          expect(decoded->index() == 1);
          expect(std::get<1>(*decoded).text == "hello");
@@ -3167,13 +3184,13 @@ suite delimited_beve_tests = [] {
       std::string buffer{};
 
       auto result1 = glz::write_beve_append(42, buffer);
-      expect(result1.has_value());
-      expect(*result1 > size_t(0));
+      expect(!result1);
+      expect(result1.count > size_t(0));
       const size_t first_size = buffer.size();
 
       auto result2 = glz::write_beve_append(std::string{"hello"}, buffer);
-      expect(result2.has_value());
-      expect(*result2 > size_t(0));
+      expect(!result2);
+      expect(result2.count > size_t(0));
       expect(buffer.size() > first_size);
    };
 
@@ -3182,13 +3199,13 @@ suite delimited_beve_tests = [] {
 
       // Write first value without delimiter
       auto result1 = glz::write_beve_append(42, buffer);
-      expect(result1.has_value());
+      expect(!result1);
       const size_t first_size = buffer.size();
 
       // Write second value with delimiter
       auto result2 = glz::write_beve_append_with_delimiter(100, buffer);
-      expect(result2.has_value());
-      expect(*result2 > size_t(0));
+      expect(!result2);
+      expect(result2.count > size_t(0));
 
       // Check delimiter was written
       expect(static_cast<uint8_t>(buffer[first_size]) == glz::tag::delimiter);
@@ -3354,15 +3371,15 @@ suite delimited_beve_tests = [] {
 
       // Append first object
       auto bytes1 = glz::write_beve_append(simple_obj{1, "first"}, buffer);
-      expect(bytes1.has_value());
+      expect(!bytes1);
 
       // Append delimiter and second object
       auto bytes2 = glz::write_beve_append_with_delimiter(simple_obj{2, "second"}, buffer);
-      expect(bytes2.has_value());
+      expect(!bytes2);
 
       // Append delimiter and third object
       auto bytes3 = glz::write_beve_append_with_delimiter(simple_obj{3, "third"}, buffer);
-      expect(bytes3.has_value());
+      expect(!bytes3);
 
       // Now read all objects back
       std::vector<simple_obj> results{};
@@ -3378,7 +3395,7 @@ suite delimited_beve_tests = [] {
    };
 
    "bytes consumed tracking"_test = [] {
-      // Test that error_ctx.location tracks bytes consumed correctly
+      // Test that error_ctx.count tracks bytes consumed correctly
       int value = 42;
       std::string buffer{};
       auto ec = glz::write_beve(value, buffer);
@@ -3387,8 +3404,2210 @@ suite delimited_beve_tests = [] {
       int result{};
       ec = glz::read_beve(result, buffer);
       expect(!ec);
-      expect(ec.location == buffer.size()) << "location should equal bytes consumed";
+      expect(ec.count == buffer.size()) << "count should equal bytes consumed";
       expect(result == 42);
+   };
+};
+
+// ============================================================================
+// Tests for error_on_missing_keys
+// ============================================================================
+
+namespace error_on_missing_keys_tests
+{
+   struct DataV1
+   {
+      int hp = 0;
+      bool is_alive = false;
+      bool operator==(const DataV1&) const = default;
+   };
+
+   struct DataV2
+   {
+      int hp = 0;
+      bool is_alive = false;
+      int new_field = 0;
+      bool operator==(const DataV2&) const = default;
+   };
+
+   struct DataWithOptional
+   {
+      int hp = 0;
+      std::optional<int> optional_field;
+      bool operator==(const DataWithOptional&) const = default;
+   };
+
+   struct DataWithNullablePtr
+   {
+      int hp = 0;
+      std::unique_ptr<int> nullable_ptr;
+   };
+
+   struct NestedOuter
+   {
+      DataV1 inner;
+      int outer_value = 0;
+      bool operator==(const NestedOuter&) const = default;
+   };
+
+   struct NestedOuterV2
+   {
+      DataV2 inner;
+      int outer_value = 0;
+      int extra = 0;
+      bool operator==(const NestedOuterV2&) const = default;
+   };
+
+   struct EmptyStruct
+   {
+      bool operator==(const EmptyStruct&) const = default;
+   };
+
+   struct DataMultipleFields
+   {
+      int a = 0;
+      int b = 0;
+      int c = 0;
+      bool operator==(const DataMultipleFields&) const = default;
+   };
+}
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::DataV1>
+{
+   using T = error_on_missing_keys_tests::DataV1;
+   static constexpr auto value = object("hp", &T::hp, "is_alive", &T::is_alive);
+};
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::DataV2>
+{
+   using T = error_on_missing_keys_tests::DataV2;
+   static constexpr auto value = object("hp", &T::hp, "is_alive", &T::is_alive, "new_field", &T::new_field);
+};
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::DataWithOptional>
+{
+   using T = error_on_missing_keys_tests::DataWithOptional;
+   static constexpr auto value = object("hp", &T::hp, "optional_field", &T::optional_field);
+};
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::DataWithNullablePtr>
+{
+   using T = error_on_missing_keys_tests::DataWithNullablePtr;
+   static constexpr auto value = object("hp", &T::hp, "nullable_ptr", &T::nullable_ptr);
+};
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::NestedOuter>
+{
+   using T = error_on_missing_keys_tests::NestedOuter;
+   static constexpr auto value = object("inner", &T::inner, "outer_value", &T::outer_value);
+};
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::NestedOuterV2>
+{
+   using T = error_on_missing_keys_tests::NestedOuterV2;
+   static constexpr auto value = object("inner", &T::inner, "outer_value", &T::outer_value, "extra", &T::extra);
+};
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::EmptyStruct>
+{
+   using T = error_on_missing_keys_tests::EmptyStruct;
+   static constexpr auto value = object();
+};
+
+template <>
+struct glz::meta<error_on_missing_keys_tests::DataMultipleFields>
+{
+   using T = error_on_missing_keys_tests::DataMultipleFields;
+   static constexpr auto value = object("a", &T::a, "b", &T::b, "c", &T::c);
+};
+
+suite beve_error_on_missing_keys = [] {
+   using namespace error_on_missing_keys_tests;
+
+   "error_on_missing_keys=false allows missing keys"_test = [] {
+      DataV1 v1{10, true};
+      std::string buffer{};
+      expect(not glz::write_beve(v1, buffer));
+
+      DataV2 v2{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_missing_keys = false};
+      auto ec = glz::read<opts>(v2, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(v2.hp == 10);
+      expect(v2.is_alive == true);
+      expect(v2.new_field == 0); // Default value preserved
+   };
+
+   "error_on_missing_keys=true detects missing required key"_test = [] {
+      DataV1 v1{10, true};
+      std::string buffer{};
+      expect(not glz::write_beve(v1, buffer));
+
+      DataV2 v2{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_missing_keys = true};
+      auto ec = glz::read<opts>(v2, buffer);
+      expect(ec.ec == glz::error_code::missing_key) << "Expected missing_key error";
+   };
+
+   "error_on_missing_keys=true with complete data succeeds"_test = [] {
+      DataV2 v2_orig{10, true, 42};
+      std::string buffer{};
+      expect(not glz::write_beve(v2_orig, buffer));
+
+      DataV2 v2{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_missing_keys = true};
+      auto ec = glz::read<opts>(v2, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(v2 == v2_orig);
+   };
+
+   "error_on_missing_keys=true allows missing optional fields"_test = [] {
+      // Write only hp (but optional_field is nullable so not required)
+      DataV1 v1{10, true};
+      std::string buffer{};
+      expect(not glz::write_beve(v1, buffer));
+
+      // Read into struct where optional_field exists but is nullable
+      DataWithOptional v{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false, .error_on_missing_keys = true};
+      auto ec = glz::read<opts>(v, buffer);
+      // Should succeed because optional_field is nullable
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(v.hp == 10);
+      expect(!v.optional_field.has_value());
+   };
+
+   "error_on_missing_keys=true allows missing unique_ptr fields"_test = [] {
+      DataV1 v1{10, true};
+      std::string buffer{};
+      expect(not glz::write_beve(v1, buffer));
+
+      DataWithNullablePtr v{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false, .error_on_missing_keys = true};
+      auto ec = glz::read<opts>(v, buffer);
+      // Should succeed because nullable_ptr is nullable
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(v.hp == 10);
+      expect(v.nullable_ptr == nullptr);
+   };
+
+   "error_on_missing_keys with nested objects"_test = [] {
+      NestedOuter outer{{5, true}, 100};
+      std::string buffer{};
+      expect(not glz::write_beve(outer, buffer));
+
+      NestedOuterV2 outer_v2{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_missing_keys = true};
+      auto ec = glz::read<opts>(outer_v2, buffer);
+      // Should fail because extra field is missing AND inner.new_field is missing
+      expect(ec.ec == glz::error_code::missing_key);
+   };
+
+   "error_on_missing_keys reports missing key in error message"_test = [] {
+      DataV1 v1{10, true};
+      std::string buffer{};
+      expect(not glz::write_beve(v1, buffer));
+
+      DataV2 v2{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_missing_keys = true};
+      auto ec = glz::read<opts>(v2, buffer);
+      expect(ec.ec == glz::error_code::missing_key);
+      // The error message should contain the missing key name
+      std::string error_msg = glz::format_error(ec, buffer);
+      expect(error_msg.find("new_field") != std::string::npos)
+         << "Error message should contain 'new_field': " << error_msg;
+   };
+
+   "error_on_missing_keys with multiple missing keys reports first"_test = [] {
+      EmptyStruct empty{};
+      std::string buffer{};
+      constexpr glz::opts write_opts = {.format = glz::BEVE};
+      expect(not glz::write<write_opts>(empty, buffer));
+
+      DataMultipleFields multi{};
+      constexpr glz::opts read_opts = {.format = glz::BEVE, .error_on_missing_keys = true};
+      auto ec = glz::read<read_opts>(multi, buffer);
+      expect(ec.ec == glz::error_code::missing_key);
+   };
+};
+
+// ============================================================================
+// Tests for skipping typed arrays (std::vector<bool>, std::vector<std::string>)
+// ============================================================================
+
+namespace skip_typed_array_tests
+{
+   struct WithBoolArray
+   {
+      int id = 0;
+      std::vector<bool> flags;
+      std::string name;
+      bool operator==(const WithBoolArray&) const = default;
+   };
+
+   struct WithoutBoolArray
+   {
+      int id = 0;
+      std::string name;
+      bool operator==(const WithoutBoolArray&) const = default;
+   };
+
+   struct WithStringArray
+   {
+      int id = 0;
+      std::vector<std::string> names;
+      int count = 0;
+      bool operator==(const WithStringArray&) const = default;
+   };
+
+   struct WithoutStringArray
+   {
+      int id = 0;
+      int count = 0;
+      bool operator==(const WithoutStringArray&) const = default;
+   };
+
+   struct WithIntArray
+   {
+      int id = 0;
+      std::vector<int> values;
+      std::string label;
+      bool operator==(const WithIntArray&) const = default;
+   };
+
+   struct WithoutIntArray
+   {
+      int id = 0;
+      std::string label;
+      bool operator==(const WithoutIntArray&) const = default;
+   };
+
+   struct WithFloatArray
+   {
+      int id = 0;
+      std::vector<float> values;
+      std::string label;
+      bool operator==(const WithFloatArray&) const = default;
+   };
+
+   struct ComplexStruct
+   {
+      int id = 0;
+      std::vector<bool> bool_arr;
+      std::vector<std::string> str_arr;
+      std::vector<int> int_arr;
+      std::string name;
+      bool operator==(const ComplexStruct&) const = default;
+   };
+
+   struct SimpleStruct
+   {
+      int id = 0;
+      std::string name;
+      bool operator==(const SimpleStruct&) const = default;
+   };
+}
+
+template <>
+struct glz::meta<skip_typed_array_tests::WithBoolArray>
+{
+   using T = skip_typed_array_tests::WithBoolArray;
+   static constexpr auto value = object("id", &T::id, "flags", &T::flags, "name", &T::name);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::WithoutBoolArray>
+{
+   using T = skip_typed_array_tests::WithoutBoolArray;
+   static constexpr auto value = object("id", &T::id, "name", &T::name);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::WithStringArray>
+{
+   using T = skip_typed_array_tests::WithStringArray;
+   static constexpr auto value = object("id", &T::id, "names", &T::names, "count", &T::count);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::WithoutStringArray>
+{
+   using T = skip_typed_array_tests::WithoutStringArray;
+   static constexpr auto value = object("id", &T::id, "count", &T::count);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::WithIntArray>
+{
+   using T = skip_typed_array_tests::WithIntArray;
+   static constexpr auto value = object("id", &T::id, "values", &T::values, "label", &T::label);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::WithoutIntArray>
+{
+   using T = skip_typed_array_tests::WithoutIntArray;
+   static constexpr auto value = object("id", &T::id, "label", &T::label);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::WithFloatArray>
+{
+   using T = skip_typed_array_tests::WithFloatArray;
+   static constexpr auto value = object("id", &T::id, "values", &T::values, "label", &T::label);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::ComplexStruct>
+{
+   using T = skip_typed_array_tests::ComplexStruct;
+   static constexpr auto value =
+      object("id", &T::id, "bool_arr", &T::bool_arr, "str_arr", &T::str_arr, "int_arr", &T::int_arr, "name", &T::name);
+};
+
+template <>
+struct glz::meta<skip_typed_array_tests::SimpleStruct>
+{
+   using T = skip_typed_array_tests::SimpleStruct;
+   static constexpr auto value = object("id", &T::id, "name", &T::name);
+};
+
+suite beve_skip_typed_arrays = [] {
+   using namespace skip_typed_array_tests;
+
+   "skip std::vector<bool> when reading unknown key"_test = [] {
+      WithBoolArray src{42, {true, false, true, true, false}, "test_name"};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutBoolArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.name == "test_name");
+   };
+
+   "skip std::vector<bool> with many elements"_test = [] {
+      std::vector<bool> large_bool_vec(1000);
+      for (size_t i = 0; i < large_bool_vec.size(); ++i) {
+         large_bool_vec[i] = (i % 3 == 0);
+      }
+      WithBoolArray src{99, large_bool_vec, "large_test"};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutBoolArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 99);
+      expect(dst.name == "large_test");
+   };
+
+   "skip std::vector<std::string> when reading unknown key"_test = [] {
+      WithStringArray src{42, {"hello", "world", "test"}, 100};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutStringArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.count == 100);
+   };
+
+   "skip std::vector<std::string> with many elements"_test = [] {
+      std::vector<std::string> large_str_vec;
+      for (int i = 0; i < 100; ++i) {
+         large_str_vec.push_back("string_" + std::to_string(i));
+      }
+      WithStringArray src{99, large_str_vec, 999};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutStringArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 99);
+      expect(dst.count == 999);
+   };
+
+   "skip std::vector<std::string> with empty strings"_test = [] {
+      WithStringArray src{42, {"", "non-empty", "", ""}, 50};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutStringArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.count == 50);
+   };
+
+   "skip std::vector<int> when reading unknown key"_test = [] {
+      WithIntArray src{42, {1, 2, 3, 4, 5}, "label"};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutIntArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.label == "label");
+   };
+
+   "skip std::vector<float> when reading unknown key"_test = [] {
+      WithFloatArray src{42, {1.1f, 2.2f, 3.3f}, "float_label"};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutIntArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.label == "float_label");
+   };
+
+   "skip multiple typed arrays"_test = [] {
+      ComplexStruct src{42, {true, false}, {"a", "b", "c"}, {1, 2, 3, 4}, "complex"};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      SimpleStruct dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.name == "complex");
+   };
+
+   "skip empty std::vector<bool>"_test = [] {
+      WithBoolArray src{42, {}, "empty_bool"};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutBoolArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.name == "empty_bool");
+   };
+
+   "skip empty std::vector<std::string>"_test = [] {
+      WithStringArray src{42, {}, 100};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithoutStringArray dst{};
+      constexpr glz::opts opts = {.format = glz::BEVE, .error_on_unknown_keys = false};
+      auto ec = glz::read<opts>(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst.id == 42);
+      expect(dst.count == 100);
+   };
+
+   "roundtrip with bool array preserved"_test = [] {
+      WithBoolArray src{42, {true, false, true}, "roundtrip"};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithBoolArray dst{};
+      auto ec = glz::read_beve(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst == src);
+   };
+
+   "roundtrip with string array preserved"_test = [] {
+      WithStringArray src{42, {"a", "bb", "ccc"}, 100};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+
+      WithStringArray dst{};
+      auto ec = glz::read_beve(dst, buffer);
+      expect(!ec) << glz::format_error(ec, buffer);
+      expect(dst == src);
+   };
+};
+
+// Bounded buffer overflow tests for BEVE format
+namespace beve_bounded_buffer_tests
+{
+   struct simple_beve_obj
+   {
+      int x = 42;
+      std::string name = "hello";
+   };
+
+   struct large_beve_obj
+   {
+      int x = 42;
+      std::string long_name = "this is a very long string that definitely won't fit in a tiny buffer";
+      std::vector<int> data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+   };
+}
+
+suite beve_bounded_buffer_overflow_tests = [] {
+   using namespace beve_bounded_buffer_tests;
+
+   "beve write to std::array with sufficient space succeeds"_test = [] {
+      simple_beve_obj obj{};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_beve(obj, buffer);
+      expect(not result) << "write should succeed with sufficient buffer";
+      expect(result.count > 0) << "count should be non-zero";
+      expect(result.count < buffer.size()) << "count should be less than buffer size";
+
+      // Verify roundtrip
+      simple_beve_obj decoded{};
+      auto ec = glz::read_beve(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded.x == obj.x) << "x should match";
+      expect(decoded.name == obj.name) << "name should match";
+   };
+
+   "beve write to std::array that is too small returns buffer_overflow"_test = [] {
+      large_beve_obj obj{};
+      std::array<char, 10> buffer{};
+
+      auto result = glz::write_beve(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow error";
+   };
+
+   "beve write to std::span with sufficient space succeeds"_test = [] {
+      simple_beve_obj obj{};
+      std::array<char, 512> storage{};
+      std::span<char> buffer(storage);
+
+      auto result = glz::write_beve(obj, buffer);
+      expect(not result) << "write should succeed with sufficient buffer";
+      expect(result.count > 0) << "count should be non-zero";
+   };
+
+   "beve write to std::span that is too small returns buffer_overflow"_test = [] {
+      large_beve_obj obj{};
+      std::array<char, 5> storage{};
+      std::span<char> buffer(storage);
+
+      auto result = glz::write_beve(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow error";
+   };
+
+   "beve write array to bounded buffer works correctly"_test = [] {
+      std::vector<int> arr{1, 2, 3, 4, 5};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_beve(arr, buffer);
+      expect(not result) << "write should succeed";
+      expect(result.count > 0) << "count should be non-zero";
+
+      std::vector<int> decoded{};
+      auto ec = glz::read_beve(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded == arr) << "decoded array should match";
+   };
+
+   "beve write large array to small bounded buffer fails"_test = [] {
+      std::vector<int> arr(100, 42);
+      std::array<char, 8> buffer{};
+
+      auto result = glz::write_beve(arr, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow for large array";
+   };
+
+   "beve resizable buffer still works as before"_test = [] {
+      simple_beve_obj obj{};
+      std::string buffer;
+
+      auto result = glz::write_beve(obj, buffer);
+      expect(not result) << "write to resizable buffer should succeed";
+      expect(buffer.size() > 0) << "buffer should have data";
+   };
+
+   "beve nested struct to bounded buffer"_test = [] {
+      my_struct obj{};
+      obj.i = 100;
+      obj.d = 3.14;
+      obj.hello = "world";
+      obj.arr = {1, 2, 3};
+      std::array<char, 1024> buffer{};
+
+      auto result = glz::write_beve(obj, buffer);
+      expect(not result) << "write should succeed";
+
+      my_struct decoded{};
+      auto ec = glz::read_beve(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded.i == obj.i) << "i should match";
+      expect(decoded.d == obj.d) << "d should match";
+      expect(decoded.hello == obj.hello) << "hello should match";
+   };
+
+   "beve map to bounded buffer"_test = [] {
+      std::map<std::string, int> obj{{"one", 1}, {"two", 2}, {"three", 3}};
+      std::array<char, 512> buffer{};
+
+      auto result = glz::write_beve(obj, buffer);
+      expect(not result) << "write should succeed";
+
+      std::map<std::string, int> decoded{};
+      auto ec = glz::read_beve(decoded, std::string_view{buffer.data(), result.count});
+      expect(!ec) << "read should succeed";
+      expect(decoded == obj) << "decoded map should match";
+   };
+};
+
+// Structs for DoS prevention tests
+struct DoSTestInner
+{
+   std::string name;
+   std::string value;
+};
+
+struct DoSTestOuter
+{
+   std::vector<DoSTestInner> items;
+};
+
+// Security tests for DoS prevention (Issues #2187 and #2190)
+// These tests verify that malicious BEVE buffers with huge length headers
+// are rejected before any memory allocation occurs.
+suite dos_prevention = [] {
+   "string memory bomb protection"_test = [] {
+      // Create a valid BEVE buffer with a long string, then truncate it
+      std::string original(1000, 'x'); // 1000 character string
+      std::string valid_buffer;
+      expect(not glz::write_beve(original, valid_buffer));
+
+      // Truncate to just the header + length (claiming 1000 bytes but only a few bytes of data)
+      // This ensures the length header claims more data than available
+      std::string truncated_buffer = valid_buffer.substr(0, 4);
+
+      std::string result;
+      auto ec = glz::read_beve(result, truncated_buffer);
+
+      // Should fail with unexpected_end, NOT crash with bad_alloc
+      expect(bool(ec)) << "Should reject truncated string buffer";
+   };
+
+   "string array memory bomb protection"_test = [] {
+      // Create a valid BEVE buffer with a few strings, then truncate it
+      std::vector<std::string> original = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"};
+      std::string valid_buffer;
+      expect(not glz::write_beve(original, valid_buffer));
+
+      // Truncate to just the header + count (claiming 10 strings but only a few bytes)
+      std::string truncated_buffer = valid_buffer.substr(0, 3);
+
+      std::vector<std::string> result;
+      auto ec = glz::read_beve(result, truncated_buffer);
+
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject truncated string array";
+   };
+
+   "boolean array memory bomb protection"_test = [] {
+      // Create valid buffer with many bools, then truncate
+      std::vector<bool> original(100, true);
+      std::string valid_buffer;
+      expect(not glz::write_beve(original, valid_buffer));
+
+      // Truncate to just header + count
+      std::string truncated_buffer = valid_buffer.substr(0, 3);
+
+      std::vector<bool> result;
+      auto ec = glz::read_beve(result, truncated_buffer);
+
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject truncated bool array";
+   };
+
+   "generic array memory bomb protection"_test = [] {
+      // Create valid buffer with many elements, then truncate
+      std::vector<glz::generic> original;
+      for (int i = 0; i < 50; i++) {
+         original.push_back(glz::generic{i});
+      }
+      std::string valid_buffer;
+      expect(not glz::write_beve(original, valid_buffer));
+
+      // Truncate to just header + count
+      std::string truncated_buffer = valid_buffer.substr(0, 3);
+
+      std::vector<glz::generic> result;
+      auto ec = glz::read_beve(result, truncated_buffer);
+
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject truncated generic array";
+   };
+
+   "numeric array memory bomb protection"_test = [] {
+      // Create a valid BEVE buffer with many ints, then truncate it
+      std::vector<int> original(100, 42); // 100 integers
+      std::string valid_buffer;
+      expect(not glz::write_beve(original, valid_buffer));
+
+      // Truncate to just the header + count (claiming 100 ints but only a few bytes of data)
+      std::string truncated_buffer = valid_buffer.substr(0, 4);
+
+      std::vector<int> result;
+      auto ec = glz::read_beve(result, truncated_buffer);
+
+      // Should fail with unexpected_end, NOT crash with bad_alloc
+      expect(bool(ec)) << "Should reject truncated numeric array buffer";
+   };
+
+   "nested struct with strings memory bomb protection"_test = [] {
+      // Create valid buffer, then truncate
+      DoSTestOuter original;
+      for (int i = 0; i < 10; i++) {
+         original.items.push_back({.name = "item" + std::to_string(i), .value = "value" + std::to_string(i)});
+      }
+      std::string valid_buffer;
+      expect(not glz::write_beve(original, valid_buffer));
+
+      // Truncate significantly
+      std::string truncated = valid_buffer.substr(0, valid_buffer.size() / 4);
+
+      DoSTestOuter result;
+      auto ec = glz::read_beve(result, truncated);
+      expect(bool(ec)) << "Should fail on truncated nested struct";
+   };
+
+   "map with huge key count protection"_test = [] {
+      // Create valid map buffer, then truncate
+      std::map<std::string, int> original = {{"one", 1}, {"two", 2}, {"three", 3}};
+      std::string valid_buffer;
+      expect(not glz::write_beve(original, valid_buffer));
+
+      // Truncate to minimal data
+      std::string truncated = valid_buffer.substr(0, 4);
+
+      std::map<std::string, int> result;
+      auto ec = glz::read_beve(result, truncated);
+      expect(bool(ec)) << "Should fail on truncated map";
+   };
+};
+
+// Custom opts for max_string_length and max_array_size tests
+struct limited_string_opts : glz::opts
+{
+   uint32_t format = glz::BEVE;
+   size_t max_string_length = 10;
+};
+
+struct limited_array_opts : glz::opts
+{
+   uint32_t format = glz::BEVE;
+   size_t max_array_size = 5;
+};
+
+struct limited_both_opts : glz::opts
+{
+   uint32_t format = glz::BEVE;
+   size_t max_string_length = 10;
+   size_t max_array_size = 5;
+};
+
+// Tests for user-configurable allocation limits (Issue #2190)
+suite allocation_limits = [] {
+   "max_string_length rejects oversized strings"_test = [] {
+      std::string long_string(100, 'x'); // 100 character string
+      std::string buffer;
+      expect(not glz::write_beve(long_string, buffer));
+
+      // Try to read with a limit of 10 characters
+      std::string result;
+      auto ec = glz::read<limited_string_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject string exceeding max_string_length";
+   };
+
+   "max_string_length allows strings under limit"_test = [] {
+      std::string short_string("hello"); // 5 characters, under 10 limit
+      std::string buffer;
+      expect(not glz::write_beve(short_string, buffer));
+
+      std::string result;
+      auto ec = glz::read<limited_string_opts{}>(result, buffer);
+      expect(!ec) << "Should accept string under max_string_length";
+      expect(result == short_string);
+   };
+
+   "max_array_size rejects oversized arrays"_test = [] {
+      std::vector<int> large_array(100, 42); // 100 integers
+      std::string buffer;
+      expect(not glz::write_beve(large_array, buffer));
+
+      // Try to read with a limit of 5 elements
+      std::vector<int> result;
+      auto ec = glz::read<limited_array_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject array exceeding max_array_size";
+   };
+
+   "max_array_size allows arrays under limit"_test = [] {
+      std::vector<int> small_array = {1, 2, 3}; // 3 elements, under 5 limit
+      std::string buffer;
+      expect(not glz::write_beve(small_array, buffer));
+
+      std::vector<int> result;
+      auto ec = glz::read<limited_array_opts{}>(result, buffer);
+      expect(!ec) << "Should accept array under max_array_size";
+      expect(result == small_array);
+   };
+
+   "max_string_length works for string arrays"_test = [] {
+      std::vector<std::string> strings = {"short", "hello", "world"};
+      std::string buffer;
+      expect(not glz::write_beve(strings, buffer));
+
+      // All strings are under 10 chars, so should succeed
+      std::vector<std::string> result;
+      auto ec = glz::read<limited_string_opts{}>(result, buffer);
+      expect(!ec) << "Should accept string array with all strings under limit";
+
+      // Now try with a long string
+      std::vector<std::string> long_strings = {"short", "this is a very long string indeed"};
+      buffer.clear();
+      expect(not glz::write_beve(long_strings, buffer));
+
+      result.clear();
+      ec = glz::read<limited_string_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject string array with string exceeding limit";
+   };
+
+   "max_array_size works for boolean arrays"_test = [] {
+      std::vector<bool> large_bools(100, true); // 100 booleans
+      std::string buffer;
+      expect(not glz::write_beve(large_bools, buffer));
+
+      std::vector<bool> result;
+      auto ec = glz::read<limited_array_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject boolean array exceeding max_array_size";
+   };
+
+   "max_array_size works for generic arrays"_test = [] {
+      std::vector<glz::generic> generics;
+      for (int i = 0; i < 100; i++) {
+         generics.push_back(glz::generic{i * 1.5});
+      }
+      std::string buffer;
+      expect(not glz::write_beve(generics, buffer));
+
+      std::vector<glz::generic> result;
+      auto ec = glz::read<limited_array_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject generic array exceeding max_array_size";
+   };
+
+   "both limits work together"_test = [] {
+      // Test that both limits can be used together
+      std::vector<std::string> data = {"hi", "yo"}; // 2 elements, short strings - OK
+      std::string buffer;
+      expect(not glz::write_beve(data, buffer));
+
+      std::vector<std::string> result;
+      auto ec = glz::read<limited_both_opts{}>(result, buffer);
+      expect(!ec) << "Should accept data under both limits";
+
+      // Exceed array limit
+      std::vector<std::string> many_strings(10, "hi"); // 10 elements, exceeds limit of 5
+      buffer.clear();
+      expect(not glz::write_beve(many_strings, buffer));
+
+      result.clear();
+      ec = glz::read<limited_both_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject when array size exceeds limit";
+
+      // Exceed string limit
+      std::vector<std::string> long_string_vec = {"hi", "this is way too long"};
+      buffer.clear();
+      expect(not glz::write_beve(long_string_vec, buffer));
+
+      result.clear();
+      ec = glz::read<limited_both_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject when string length exceeds limit";
+   };
+
+   "no limit by default"_test = [] {
+      // With default opts (max_string_length = 0, max_array_size = 0), no limits apply
+      std::string long_string(1000, 'x');
+      std::string buffer;
+      expect(not glz::write_beve(long_string, buffer));
+
+      std::string result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(!ec) << "Default opts should allow any string length";
+      expect(result == long_string);
+
+      std::vector<int> large_array(1000, 42);
+      buffer.clear();
+      expect(not glz::write_beve(large_array, buffer));
+
+      std::vector<int> arr_result;
+      ec = glz::read_beve(arr_result, buffer);
+      expect(!ec) << "Default opts should allow any array size";
+      expect(arr_result == large_array);
+   };
+
+   "max_map_size applies to std::map"_test = [] {
+      std::map<std::string, int> large_map;
+      for (int i = 0; i < 100; ++i) {
+         large_map["key" + std::to_string(i)] = i;
+      }
+      std::string buffer;
+      expect(not glz::write_beve(large_map, buffer));
+
+      // Try to read with a limit of 50 entries
+      struct map_limited_opts : glz::opts
+      {
+         uint32_t format = glz::BEVE;
+         size_t max_map_size = 50;
+      };
+
+      std::map<std::string, int> result;
+      auto ec = glz::read<map_limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject oversized map";
+   };
+
+   "max_map_size accepts valid std::map"_test = [] {
+      std::map<std::string, int> small_map{{"a", 1}, {"b", 2}, {"c", 3}};
+      std::string buffer;
+      expect(not glz::write_beve(small_map, buffer));
+
+      struct map_limited_opts : glz::opts
+      {
+         uint32_t format = glz::BEVE;
+         size_t max_map_size = 50;
+      };
+
+      std::map<std::string, int> result;
+      auto ec = glz::read<map_limited_opts{}>(result, buffer);
+      expect(!ec) << "Should accept map within limit";
+      expect(result == small_map);
+   };
+
+   "max_map_size applies to std::unordered_map"_test = [] {
+      std::unordered_map<std::string, int> large_map;
+      for (int i = 0; i < 100; ++i) {
+         large_map["key" + std::to_string(i)] = i;
+      }
+      std::string buffer;
+      expect(not glz::write_beve(large_map, buffer));
+
+      struct map_limited_opts : glz::opts
+      {
+         uint32_t format = glz::BEVE;
+         size_t max_map_size = 50;
+      };
+
+      std::unordered_map<std::string, int> result;
+      auto ec = glz::read<map_limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject oversized unordered_map";
+   };
+
+   "max_array_size does not affect maps"_test = [] {
+      // Verify that max_array_size doesn't limit maps (they use max_map_size)
+      std::map<std::string, int> large_map;
+      for (int i = 0; i < 100; ++i) {
+         large_map["key" + std::to_string(i)] = i;
+      }
+      std::string buffer;
+      expect(not glz::write_beve(large_map, buffer));
+
+      // max_array_size = 50 should NOT affect maps
+      struct array_limited_opts : glz::opts
+      {
+         uint32_t format = glz::BEVE;
+         size_t max_array_size = 50;
+      };
+
+      std::map<std::string, int> result;
+      auto ec = glz::read<array_limited_opts{}>(result, buffer);
+      expect(!ec) << "max_array_size should not limit maps";
+      expect(result.size() == 100);
+   };
+
+   "extended opts usage with max_array_size"_test = [] {
+      std::vector<int> large_array(100, 42);
+      std::string buffer;
+      expect(not glz::write_beve(large_array, buffer));
+
+      // Extend opts to add allocation limits
+      struct array_limited_opts : glz::opts
+      {
+         uint32_t format = glz::BEVE;
+         size_t max_array_size = 50;
+      };
+
+      std::vector<int> result;
+      auto ec = glz::read<array_limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject using extended opts";
+   };
+
+   "extended opts usage with max_string_length"_test = [] {
+      std::string long_string(100, 'x');
+      std::string buffer;
+      expect(not glz::write_beve(long_string, buffer));
+
+      struct string_limited_opts : glz::opts
+      {
+         uint32_t format = glz::BEVE;
+         size_t max_string_length = 50;
+      };
+
+      std::string result;
+      auto ec = glz::read<string_limited_opts{}>(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject using extended opts";
+   };
+};
+
+// Structs for max_length wrapper tests
+struct MaxLengthStringStruct
+{
+   std::string name;
+   std::string description;
+};
+
+template <>
+struct glz::meta<MaxLengthStringStruct>
+{
+   using T = MaxLengthStringStruct;
+   static constexpr auto value = object("name", glz::max_length<&T::name, 10>, // limit to 10 chars
+                                        "description", &T::description // no limit
+   );
+};
+
+struct MaxLengthArrayStruct
+{
+   std::vector<int> small_list;
+   std::vector<int> big_list;
+};
+
+template <>
+struct glz::meta<MaxLengthArrayStruct>
+{
+   using T = MaxLengthArrayStruct;
+   static constexpr auto value = object("small_list", glz::max_length<&T::small_list, 5>, // limit to 5 elements
+                                        "big_list", &T::big_list // no limit
+   );
+};
+
+// Complex struct for testing generic array path
+struct ComplexItem
+{
+   std::string name;
+   int value;
+   std::vector<double> data;
+};
+
+struct MaxLengthComplexArrayStruct
+{
+   std::vector<ComplexItem> items;
+};
+
+template <>
+struct glz::meta<MaxLengthComplexArrayStruct>
+{
+   using T = MaxLengthComplexArrayStruct;
+   static constexpr auto value = object("items", glz::max_length<&T::items, 3> // limit to 3 complex items
+   );
+};
+
+// Tests for max_length wrapper (per-field limits)
+suite max_length_wrapper = [] {
+   "max_length wrapper limits string field"_test = [] {
+      MaxLengthStringStruct original{.name = "hello", .description = "a long description"};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthStringStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(!ec) << "Should accept strings under limit";
+      expect(result.name == original.name);
+      expect(result.description == original.description);
+   };
+
+   "max_length wrapper rejects oversized string field"_test = [] {
+      MaxLengthStringStruct original{.name = "this name is way too long", .description = "ok"};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthStringStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject string field exceeding max_length";
+   };
+
+   "max_length wrapper allows unlimited field"_test = [] {
+      MaxLengthStringStruct original{.name = "short", .description = std::string(1000, 'x')};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthStringStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(!ec) << "Unlimited field should accept any length";
+      expect(result.description == original.description);
+   };
+
+   "max_length wrapper limits array field"_test = [] {
+      MaxLengthArrayStruct original{.small_list = {1, 2, 3}, .big_list = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthArrayStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(!ec) << "Should accept array under limit";
+      expect(result.small_list == original.small_list);
+      expect(result.big_list == original.big_list);
+   };
+
+   "max_length wrapper rejects oversized array field"_test = [] {
+      MaxLengthArrayStruct original{.small_list = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, .big_list = {}};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthArrayStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject array field exceeding max_length";
+   };
+
+   "max_length wrapper roundtrip preserves data"_test = [] {
+      MaxLengthStringStruct original{.name = "test", .description = "desc"};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthStringStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(!ec);
+      expect(result.name == original.name);
+      expect(result.description == original.description);
+   };
+
+   "max_length wrapper limits complex struct array"_test = [] {
+      MaxLengthComplexArrayStruct original{
+         .items = {{.name = "a", .value = 1, .data = {1.0, 2.0}}, {.name = "b", .value = 2, .data = {3.0}}}};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthComplexArrayStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(!ec) << "Should accept complex array under limit";
+      expect(result.items.size() == 2);
+      expect(result.items[0].name == "a");
+      expect(result.items[1].value == 2);
+   };
+
+   "max_length wrapper rejects oversized complex struct array"_test = [] {
+      MaxLengthComplexArrayStruct original{.items = {{.name = "a", .value = 1, .data = {1.0}},
+                                                     {.name = "b", .value = 2, .data = {2.0}},
+                                                     {.name = "c", .value = 3, .data = {3.0}},
+                                                     {.name = "d", .value = 4, .data = {4.0}},
+                                                     {.name = "e", .value = 5, .data = {5.0}}}};
+      std::string buffer;
+      expect(not glz::write_beve(original, buffer));
+
+      MaxLengthComplexArrayStruct result;
+      auto ec = glz::read_beve(result, buffer);
+      expect(ec.ec == glz::error_code::invalid_length) << "Should reject complex struct array exceeding max_length";
+   };
+};
+
+// ============ beve_size tests ============
+
+suite beve_size_tests = [] {
+   "beve_size primitive types"_test = [] {
+      // Booleans: 1 byte tag
+      expect(glz::beve_size(true) == size_t(1));
+      expect(glz::beve_size(false) == size_t(1));
+
+      // Numbers: 1 byte tag + sizeof(type)
+      expect(glz::beve_size(int8_t{42}) == 1 + sizeof(int8_t));
+      expect(glz::beve_size(uint8_t{42}) == 1 + sizeof(uint8_t));
+      expect(glz::beve_size(int16_t{42}) == 1 + sizeof(int16_t));
+      expect(glz::beve_size(uint16_t{42}) == 1 + sizeof(uint16_t));
+      expect(glz::beve_size(int32_t{42}) == 1 + sizeof(int32_t));
+      expect(glz::beve_size(uint32_t{42}) == 1 + sizeof(uint32_t));
+      expect(glz::beve_size(int64_t{42}) == 1 + sizeof(int64_t));
+      expect(glz::beve_size(uint64_t{42}) == 1 + sizeof(uint64_t));
+      expect(glz::beve_size(float{3.14f}) == 1 + sizeof(float));
+      expect(glz::beve_size(double{3.14}) == 1 + sizeof(double));
+   };
+
+   "beve_size matches actual size for primitives"_test = [] {
+      auto verify = [](auto value) {
+         const size_t predicted = glz::beve_size(value);
+         auto buffer = glz::write_beve(value).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(true);
+      verify(false);
+      verify(int8_t{-128});
+      verify(uint8_t{255});
+      verify(int16_t{-32768});
+      verify(uint16_t{65535});
+      verify(int32_t{-2147483648});
+      verify(uint32_t{4294967295});
+      verify(int64_t{-9223372036854775807LL});
+      verify(uint64_t{18446744073709551615ULL});
+      verify(float{3.14159f});
+      verify(double{2.718281828459045});
+   };
+
+   "beve_size strings"_test = [] {
+      // Empty string: 1 byte tag + 1 byte compressed_int(0)
+      expect(glz::beve_size(std::string{}) == size_t(2));
+
+      // Short string (< 64 chars): 1 byte tag + 1 byte length + n chars
+      std::string hello = "Hello";
+      expect(glz::beve_size(hello) == size_t(1 + 1 + hello.size()));
+
+      // Verify against actual serialization
+      auto buffer = glz::write_beve(hello).value();
+      expect(glz::beve_size(hello) == buffer.size());
+   };
+
+   "beve_size string length encoding"_test = [] {
+      auto verify_string = [](size_t len) {
+         std::string s(len, 'x');
+         const size_t predicted = glz::beve_size(s);
+         auto buffer = glz::write_beve(s).value();
+         expect(predicted == buffer.size())
+            << "Length " << len << ": Predicted " << predicted << ", Actual " << buffer.size();
+      };
+
+      // Test compressed int boundaries
+      verify_string(0); // empty
+      verify_string(1); // minimal
+      verify_string(63); // max 1-byte compressed int
+      verify_string(64); // min 2-byte compressed int
+      verify_string(100);
+      verify_string(16383); // max 2-byte compressed int
+      verify_string(16384); // min 4-byte compressed int
+   };
+
+   "beve_size vectors"_test = [] {
+      auto verify = [](auto vec) {
+         const size_t predicted = glz::beve_size(vec);
+         auto buffer = glz::write_beve(vec).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::vector<int>{});
+      verify(std::vector<int>{1, 2, 3, 4, 5});
+      verify(std::vector<double>{1.1, 2.2, 3.3});
+      verify(std::vector<std::string>{"hello", "world"});
+      verify(std::vector<bool>{true, false, true, true, false});
+   };
+
+   "beve_size arrays"_test = [] {
+      auto verify = [](auto arr) {
+         const size_t predicted = glz::beve_size(arr);
+         auto buffer = glz::write_beve(arr).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::array<int, 5>{1, 2, 3, 4, 5});
+      verify(std::array<double, 3>{1.1, 2.2, 3.3});
+      verify(std::array<std::string, 2>{"hello", "world"});
+   };
+
+   "beve_size maps"_test = [] {
+      auto verify = [](auto map) {
+         const size_t predicted = glz::beve_size(map);
+         auto buffer = glz::write_beve(map).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::map<std::string, int>{});
+      verify(std::map<std::string, int>{{"a", 1}, {"b", 2}, {"c", 3}});
+      verify(std::map<int, double>{{1, 1.1}, {2, 2.2}});
+      verify(std::unordered_map<std::string, std::string>{{"key1", "value1"}, {"key2", "value2"}});
+   };
+
+   "beve_size my_struct"_test = [] {
+      my_struct obj{};
+      const size_t predicted = glz::beve_size(obj);
+      auto buffer = glz::write_beve(obj).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size Thing (complex nested struct)"_test = [] {
+      Thing obj{};
+      const size_t predicted = glz::beve_size(obj);
+      auto buffer = glz::write_beve(obj).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size nested containers"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      // Vector of vectors
+      verify(std::vector<std::vector<int>>{{1, 2}, {3, 4, 5}, {6}});
+
+      // Map of vectors
+      verify(std::map<std::string, std::vector<int>>{{"a", {1, 2, 3}}, {"b", {4, 5}}});
+
+      // Vector of maps
+      verify(std::vector<std::map<std::string, int>>{{{"x", 1}}, {{"y", 2}, {"z", 3}}});
+   };
+
+   "beve_size optional"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::optional<int>{});
+      verify(std::optional<int>{42});
+      verify(std::optional<std::string>{"hello"});
+      verify(std::optional<std::vector<int>>{{1, 2, 3}});
+   };
+
+   "beve_size variant"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      using Var = std::variant<int, double, std::string>;
+      verify(Var{42});
+      verify(Var{3.14});
+      verify(Var{"hello"});
+   };
+
+   "beve_size tuple"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::tuple<int>{42});
+      verify(std::tuple<int, double, std::string>{42, 3.14, "hello"});
+      verify(std::make_tuple(1, 2.0, std::vector<int>{1, 2, 3}));
+   };
+
+   "beve_size pair"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::pair<int, double>{42, 3.14});
+      verify(std::pair<std::string, std::vector<int>>{"key", {1, 2, 3}});
+   };
+
+   "beve_size enum"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(Color::Red);
+      verify(Color::Green);
+      verify(Color::Blue);
+   };
+
+   "beve_size complex numbers"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::complex<float>{1.0f, 2.0f});
+      verify(std::complex<double>{3.14, 2.718});
+   };
+
+   "beve_size shared_ptr"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::shared_ptr<int>{});
+      verify(std::make_shared<int>(42));
+      verify(std::make_shared<std::string>("hello"));
+   };
+
+   "beve_size unique_ptr"_test = [] {
+      auto verify = [](auto&& val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      std::unique_ptr<int> null_ptr;
+      verify(null_ptr);
+      verify(std::make_unique<int>(42));
+      verify(std::make_unique<std::string>("hello"));
+   };
+
+   "beve_size_untagged"_test = [] {
+      my_struct obj{};
+      const size_t predicted = glz::beve_size_untagged(obj);
+      auto buffer = glz::write_beve_untagged(obj).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size deeply nested containers"_test = [] {
+      // Test with deeply nested container structures
+      std::map<std::string, std::vector<std::map<std::string, std::vector<int>>>> deeply_nested;
+      deeply_nested["level1"] = {{{"a", {1, 2, 3}}, {"b", {4, 5}}},
+                                 {{"c", {6, 7, 8, 9}}, {"d", {10}}, {"e", {11, 12}}}};
+
+      const size_t predicted = glz::beve_size(deeply_nested);
+      auto buffer = glz::write_beve(deeply_nested).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size deque"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::deque<int>{1, 2, 3, 4, 5});
+      verify(std::deque<std::string>{"a", "b", "c"});
+   };
+
+   "beve_size list"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::list<int>{1, 2, 3, 4, 5});
+      verify(std::list<double>{1.1, 2.2, 3.3});
+   };
+
+   "beve_size set"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::set<int>{1, 2, 3, 4, 5});
+      verify(std::set<std::string>{"a", "b", "c"});
+   };
+
+   "beve_size bitset"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::bitset<8>{0b10101010});
+      verify(std::bitset<16>{0xABCD});
+      verify(std::bitset<64>{0xDEADBEEFCAFEBABE});
+   };
+
+   "beve_size glaze_array_t (V3)"_test = [] {
+      // V3 is defined with glz::meta using array()
+      V3 vec{1.0, 2.0, 3.0};
+      const size_t predicted = glz::beve_size(vec);
+      auto buffer = glz::write_beve(vec).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size glaze_value_t (ModuleID)"_test = [] {
+      // ModuleID wraps a uint64_t via glaze value wrapper
+      ModuleID id{42};
+      const size_t predicted = glz::beve_size(id);
+      auto buffer = glz::write_beve(id).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size sub_thing with lambda accessor"_test = [] {
+      // sub_thing has a lambda accessor in its meta
+      sub_thing st{};
+      const size_t predicted = glz::beve_size(st);
+      auto buffer = glz::write_beve(st).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size sub_thing2 with file_include"_test = [] {
+      // sub_thing2 has file_include in its meta which should serialize as empty string
+      sub_thing2 st2{};
+      const size_t predicted = glz::beve_size(st2);
+      auto buffer = glz::write_beve(st2).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size glz::obj inline object"_test = [] {
+      auto obj = glz::obj{"name", "test", "value", 42, "data", std::vector<int>{1, 2, 3}};
+      const size_t predicted = glz::beve_size(obj);
+      auto buffer = glz::write_beve(obj).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size raw_json"_test = [] {
+      // raw_json wraps a string
+      glz::raw_json rj{R"({"key": "value"})"};
+      const size_t predicted = glz::beve_size(rj);
+      auto buffer = glz::write_beve(rj).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size span"_test = [] {
+      std::vector<int> vec{1, 2, 3, 4, 5};
+      std::span<int> sp{vec};
+      const size_t predicted = glz::beve_size(sp);
+      auto buffer = glz::write_beve(sp).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size const char*"_test = [] {
+      const char* str = "hello world";
+      const size_t predicted = glz::beve_size(str);
+      auto buffer = glz::write_beve(str).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size nullptr const char*"_test = [] {
+      const char* str = nullptr;
+      const size_t predicted = glz::beve_size(str);
+      auto buffer = glz::write_beve(str).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size C-style array"_test = [] {
+      int arr[5] = {1, 2, 3, 4, 5};
+      const size_t predicted = glz::beve_size(arr);
+      auto buffer = glz::write_beve(arr).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size vector of complex"_test = [] {
+      std::vector<std::complex<double>> vec{{1.0, 2.0}, {3.0, 4.0}, {5.0, 6.0}};
+      const size_t predicted = glz::beve_size(vec);
+      auto buffer = glz::write_beve(vec).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size vector of variant"_test = [] {
+      using Var = std::variant<int, std::string, double>;
+      std::vector<Var> vec{42, "hello", 3.14, "world", 100};
+      const size_t predicted = glz::beve_size(vec);
+      auto buffer = glz::write_beve(vec).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size nested optional"_test = [] {
+      std::optional<std::optional<int>> nested_null;
+      const size_t predicted1 = glz::beve_size(nested_null);
+      auto buffer1 = glz::write_beve(nested_null).value();
+      expect(predicted1 == buffer1.size()) << "Null nested: Predicted " << predicted1 << ", Actual " << buffer1.size();
+
+      std::optional<std::optional<int>> nested_inner_null = std::optional<int>{};
+      const size_t predicted2 = glz::beve_size(nested_inner_null);
+      auto buffer2 = glz::write_beve(nested_inner_null).value();
+      expect(predicted2 == buffer2.size()) << "Inner null: Predicted " << predicted2 << ", Actual " << buffer2.size();
+
+      std::optional<std::optional<int>> nested_value = std::optional<int>{42};
+      const size_t predicted3 = glz::beve_size(nested_value);
+      auto buffer3 = glz::write_beve(nested_value).value();
+      expect(predicted3 == buffer3.size()) << "Has value: Predicted " << predicted3 << ", Actual " << buffer3.size();
+   };
+
+   "beve_size map with int keys"_test = [] {
+      std::map<int32_t, std::string> map{{1, "one"}, {2, "two"}, {-5, "negative five"}};
+      const size_t predicted = glz::beve_size(map);
+      auto buffer = glz::write_beve(map).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size map with uint64 keys"_test = [] {
+      std::map<uint64_t, double> map{{1ULL, 1.1}, {1000000000000ULL, 2.2}};
+      const size_t predicted = glz::beve_size(map);
+      auto buffer = glz::write_beve(map).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size vector of pairs (concatenate)"_test = [] {
+      // Test with concatenate option which affects how vector<pair> is serialized
+      constexpr beve_concat_opts beve_concat{{glz::BEVE}};
+      std::vector<std::pair<std::string, int>> vec{{"a", 1}, {"b", 2}, {"c", 3}};
+
+      // Calculate size with concatenate option
+      const size_t predicted =
+         glz::calculate_size<glz::BEVE, std::remove_cvref_t<decltype(vec)>>::template op<beve_concat>(vec);
+      std::string buffer;
+      expect(not glz::write<beve_concat>(vec, buffer));
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size char type"_test = [] {
+      char c = 'A';
+      const size_t predicted = glz::beve_size(c);
+      auto buffer = glz::write_beve(c).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size compressed_int_size helper"_test = [] {
+      // Test the helper function directly
+      expect(glz::compressed_int_size(0) == size_t(1));
+      expect(glz::compressed_int_size(63) == size_t(1));
+      expect(glz::compressed_int_size(64) == size_t(2));
+      expect(glz::compressed_int_size(16383) == size_t(2));
+      expect(glz::compressed_int_size(16384) == size_t(4));
+      expect(glz::compressed_int_size(1073741823) == size_t(4));
+      expect(glz::compressed_int_size(1073741824) == size_t(8));
+
+      // Compile-time version
+      static_assert(glz::compressed_int_size<0>() == 1);
+      static_assert(glz::compressed_int_size<63>() == 1);
+      static_assert(glz::compressed_int_size<64>() == 2);
+      static_assert(glz::compressed_int_size<16383>() == 2);
+      static_assert(glz::compressed_int_size<16384>() == 4);
+      static_assert(glz::compressed_int_size<1073741823>() == 4);
+      static_assert(glz::compressed_int_size<1073741824>() == 8);
+   };
+
+   "beve_size large vector 4-byte compressed int"_test = [] {
+      // Test a vector with > 16383 elements to trigger 4-byte compressed int for count
+      std::vector<uint8_t> large_vec(20000, 42);
+      const size_t predicted = glz::beve_size(large_vec);
+      auto buffer = glz::write_beve(large_vec).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+   };
+
+   "beve_size empty containers"_test = [] {
+      auto verify = [](auto val) {
+         const size_t predicted = glz::beve_size(val);
+         auto buffer = glz::write_beve(val).value();
+         expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+      };
+
+      verify(std::vector<int>{});
+      verify(std::map<std::string, int>{});
+      verify(std::list<double>{});
+      verify(std::deque<std::string>{});
+      verify(std::set<int>{});
+      verify(std::unordered_map<std::string, int>{});
+   };
+
+   "beve_size structs with skip_null_members"_test = [] {
+      // Thing has optional members - when null and skip_null_members is true,
+      // the size should reflect fewer members
+      Thing obj{};
+      obj.optional = std::nullopt; // ensure optional is null
+      obj.sptr = nullptr; // null shared_ptr
+
+      const size_t predicted = glz::beve_size(obj);
+      auto buffer = glz::write_beve(obj).value();
+      expect(predicted == buffer.size()) << "Predicted: " << predicted << ", Actual: " << buffer.size();
+
+      // Now with values
+      obj.optional = V3{1.0, 2.0, 3.0};
+      obj.sptr = std::make_shared<sub_thing>();
+
+      const size_t predicted2 = glz::beve_size(obj);
+      auto buffer2 = glz::write_beve(obj).value();
+      expect(predicted2 == buffer2.size())
+         << "With values - Predicted: " << predicted2 << ", Actual " << buffer2.size();
+   };
+};
+
+// ============ beve_peek_header tests ============
+
+suite beve_peek_header_tests = [] {
+   "beve_peek_header empty buffer"_test = [] {
+      std::string buffer{};
+      auto result = glz::beve_peek_header(buffer);
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
+   };
+
+   "beve_peek_header null value"_test = [] {
+      std::nullptr_t null_val{};
+      auto buffer = glz::write_beve(null_val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::null);
+      expect(result->count == 0u);
+      expect(result->header_size == 1u);
+   };
+
+   "beve_peek_header boolean"_test = [] {
+      bool val = true;
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::null); // boolean shares null base type
+      expect(result->count == 1u);
+      expect(result->header_size == 1u);
+   };
+
+   "beve_peek_header number"_test = [] {
+      int32_t val = 42;
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::number);
+      expect(result->count == 1u);
+      expect(result->header_size == 1u);
+   };
+
+   "beve_peek_header string"_test = [] {
+      std::string val = "hello";
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::string);
+      expect(result->count == 5u); // string length
+      expect(result->header_size == 2u); // tag + 1-byte compressed int for length 5
+   };
+
+   "beve_peek_header long string"_test = [] {
+      std::string val(100, 'x'); // 100 character string
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::string);
+      expect(result->count == 100u);
+      expect(result->header_size == 3u); // tag + 2-byte compressed int for length 100
+   };
+
+   "beve_peek_header vector"_test = [] {
+      std::vector<int> val{1, 2, 3, 4, 5};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::typed_array);
+      expect(result->count == 5u);
+      expect(result->header_size == 2u); // tag + 1-byte compressed int
+   };
+
+   "beve_peek_header large vector"_test = [] {
+      std::vector<int> val(1000);
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::typed_array);
+      expect(result->count == 1000u);
+      expect(result->header_size == 3u); // tag + 2-byte compressed int
+   };
+
+   "beve_peek_header object"_test = [] {
+      my_struct val{};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::object);
+      // my_struct has 5 members in its glz::meta: i, d, hello, arr, include
+      expect(result->count == 5u);
+   };
+
+   "beve_peek_header map"_test = [] {
+      std::map<std::string, int> val{{"a", 1}, {"b", 2}, {"c", 3}};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::object);
+      expect(result->count == 3u);
+   };
+
+   "beve_peek_header generic array"_test = [] {
+      std::tuple<int, std::string, double> val{42, "hello", 3.14};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::generic_array);
+      expect(result->count == 3u);
+   };
+
+   "beve_peek_header variant"_test = [] {
+      std::variant<int, std::string> val = std::string("test");
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::variant);
+      expect(result->count == 1u); // variant index (std::string is index 1)
+      expect(result->header_size == 2u); // tag + 1-byte compressed int for index 1
+   };
+
+   "beve_peek_header variant index 0"_test = [] {
+      std::variant<int, std::string> val = 42;
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::variant);
+      expect(result->count == 0u); // variant index (int is index 0)
+   };
+
+   "beve_peek_header complex number"_test = [] {
+      std::complex<double> val{3.14, 2.71};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::complex);
+      expect(result->count == 2u); // real + imag parts
+      expect(result->header_size == 2u); // tag + complex_header
+   };
+
+   "beve_peek_header complex array"_test = [] {
+      std::vector<std::complex<float>> val{{1.0f, 2.0f}, {3.0f, 4.0f}, {5.0f, 6.0f}};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::complex);
+      expect(result->count == 3u); // 3 complex elements
+      expect(result->header_size == 3u); // tag + complex_header + 1-byte count
+   };
+
+   "beve_peek_header roundtrip with preallocation"_test = [] {
+      // Demonstrate the use case: peek to get size, preallocate, then read
+      std::vector<double> original{1.1, 2.2, 3.3, 4.4, 5.5};
+      auto buffer = glz::write_beve(original).value();
+
+      // Peek to get element count
+      auto header = glz::beve_peek_header(buffer);
+      expect(header.has_value());
+      expect(header->count == 5u);
+
+      // Now we know we need to allocate for 5 elements
+      std::vector<double> result;
+      result.reserve(header->count); // pre-allocate based on peeked size
+
+      expect(!glz::read_beve(result, buffer));
+      expect(result == original);
+   };
+
+   "beve_peek_header with raw pointer"_test = [] {
+      std::vector<int> val{1, 2, 3};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer.data(), buffer.size());
+      expect(result.has_value());
+      expect(result->type == glz::tag::typed_array);
+      expect(result->count == 3u);
+   };
+
+   "beve_peek_header truncated buffer"_test = [] {
+      std::vector<int> val(100);
+      auto buffer = glz::write_beve(val).value();
+
+      // Truncate to just the tag byte - should fail since we need the compressed int
+      std::string truncated(buffer.begin(), buffer.begin() + 1);
+      auto result = glz::beve_peek_header(truncated);
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
+   };
+
+   // ---- Additional coverage tests ----
+
+   "beve_peek_header different numeric types"_test = [] {
+      // Test various numeric types to verify tag parsing
+      {
+         double val = 3.14159;
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::number);
+         expect(result->count == 1u);
+         expect(result->header_size == 1u);
+      }
+      {
+         float val = 2.5f;
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::number);
+      }
+      {
+         uint64_t val = 12345678901234ULL;
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::number);
+      }
+      {
+         int8_t val = -42;
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::number);
+      }
+   };
+
+   "beve_peek_header empty containers"_test = [] {
+      {
+         std::vector<int> val{};
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::typed_array);
+         expect(result->count == 0u);
+      }
+      {
+         std::string val{};
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::string);
+         expect(result->count == 0u);
+      }
+      {
+         std::map<std::string, int> val{};
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::object);
+         expect(result->count == 0u);
+      }
+   };
+
+   "beve_peek_header compressed int boundaries"_test = [] {
+      // Test compressed int encoding boundaries
+      // 1-byte max: 63 elements
+      {
+         std::vector<uint8_t> val(63);
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->count == 63u);
+         expect(result->header_size == 2u); // tag + 1-byte compressed int
+      }
+      // 2-byte min: 64 elements
+      {
+         std::vector<uint8_t> val(64);
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->count == 64u);
+         expect(result->header_size == 3u); // tag + 2-byte compressed int
+      }
+      // 2-byte max: 16383 elements
+      {
+         std::vector<uint8_t> val(16383);
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->count == 16383u);
+         expect(result->header_size == 3u); // tag + 2-byte compressed int
+      }
+      // 4-byte min: 16384 elements
+      {
+         std::vector<uint8_t> val(16384);
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->count == 16384u);
+         expect(result->header_size == 5u); // tag + 4-byte compressed int
+      }
+   };
+
+   "beve_peek_header boolean values"_test = [] {
+      {
+         bool val = true;
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::null); // booleans share null base type
+         expect(result->count == 1u);
+      }
+      {
+         bool val = false;
+         auto buffer = glz::write_beve(val).value();
+         auto result = glz::beve_peek_header(buffer);
+         expect(result.has_value());
+         expect(result->type == glz::tag::null);
+         expect(result->count == 1u);
+      }
+   };
+
+   "beve_peek_header bool vector"_test = [] {
+      std::vector<bool> val{true, false, true, true, false};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::typed_array);
+      expect(result->count == 5u);
+   };
+
+   "beve_peek_header string vector"_test = [] {
+      std::vector<std::string> val{"hello", "world", "test"};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::typed_array);
+      expect(result->count == 3u);
+   };
+
+   "beve_peek_header complex float"_test = [] {
+      std::complex<float> val{1.5f, 2.5f};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::complex);
+      expect(result->count == 2u);
+      expect(result->header_size == 2u);
+   };
+
+   "beve_peek_header large complex array"_test = [] {
+      std::vector<std::complex<double>> val(100);
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::complex);
+      expect(result->count == 100u);
+      expect(result->header_size == 4u); // tag + complex_header + 2-byte count
+   };
+
+   "beve_peek_header variant with many alternatives"_test = [] {
+      std::variant<int, double, std::string, bool, float> val = 3.14; // index 1
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::extensions);
+      expect(result->ext_type == glz::extension::variant);
+      expect(result->count == 1u); // double is at index 1
+   };
+
+   "beve_peek_header nested tuple"_test = [] {
+      std::tuple<int, std::tuple<double, std::string>, bool> val{42, {3.14, "test"}, true};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::generic_array);
+      expect(result->count == 3u); // outer tuple has 3 elements
+   };
+
+   "beve_peek_header pair"_test = [] {
+      std::pair<std::string, int> val{"key", 42};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      // pairs serialize as objects with 1 key-value pair
+      expect(result->type == glz::tag::object);
+      expect(result->count == 1u);
+   };
+
+   "beve_peek_header optional with value"_test = [] {
+      std::optional<int> val = 42;
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      // optional with value serializes as the contained type
+      expect(result->type == glz::tag::number);
+   };
+
+   "beve_peek_header optional null"_test = [] {
+      std::optional<int> val = std::nullopt;
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::null);
+      expect(result->count == 0u);
+   };
+
+   "beve_peek_header array fixed size"_test = [] {
+      std::array<int, 5> val{1, 2, 3, 4, 5};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+      expect(result->type == glz::tag::typed_array);
+      expect(result->count == 5u);
+   };
+
+   "beve_peek_header header_size consistency"_test = [] {
+      // Verify header_size allows correct seeking past header
+      std::vector<double> val{1.1, 2.2, 3.3};
+      auto buffer = glz::write_beve(val).value();
+
+      auto result = glz::beve_peek_header(buffer);
+      expect(result.has_value());
+
+      // After header comes the data: 3 doubles = 24 bytes
+      size_t expected_data_size = 3 * sizeof(double);
+      expect(buffer.size() == result->header_size + expected_data_size);
+   };
+
+   "beve_peek_header error on truncated string header"_test = [] {
+      std::string val = "hello";
+      auto buffer = glz::write_beve(val).value();
+
+      // Truncate to just the tag byte
+      std::string truncated(buffer.begin(), buffer.begin() + 1);
+      auto result = glz::beve_peek_header(truncated);
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
+   };
+
+   "beve_peek_header error on truncated complex header"_test = [] {
+      std::complex<double> val{1.0, 2.0};
+      auto buffer = glz::write_beve(val).value();
+
+      // Truncate to just the extension tag byte
+      std::string truncated(buffer.begin(), buffer.begin() + 1);
+      auto result = glz::beve_peek_header(truncated);
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
+   };
+
+   "beve_peek_header error on truncated variant header"_test = [] {
+      std::variant<int, std::string> val = std::string("test");
+      auto buffer = glz::write_beve(val).value();
+
+      // Truncate to just the extension tag byte
+      std::string truncated(buffer.begin(), buffer.begin() + 1);
+      auto result = glz::beve_peek_header(truncated);
+      expect(!result.has_value());
+      expect(result.error().ec == glz::error_code::unexpected_end);
    };
 };
 

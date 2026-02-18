@@ -14,6 +14,61 @@ The Glaze CMake has the option `glaze_ENABLE_AVX2`. This will attempt to use `AV
 >
 > Glaze uses SIMD Within A Resgister (SWAR) for most optimizations, which are fully cross-platform and does not require any SIMD instrisics or special compiler flags. So, SIMD flags don't usually have a large impact with Glaze.
 
+## Reducing Compilation Time
+
+Glaze aggressively uses forced inlining (`GLZ_ALWAYS_INLINE`) for peak runtime performance. If compilation time is more important than peak performance, you can disable forced inlining:
+
+```cmake
+set(glaze_DISABLE_ALWAYS_INLINE ON)
+```
+
+Or define `GLZ_DISABLE_ALWAYS_INLINE` before including Glaze headers.
+
+This causes `GLZ_ALWAYS_INLINE` and `GLZ_FLATTEN` to fall back to regular `inline` hints, letting the compiler decide what to inline.
+
+> [!NOTE]
+>
+> This option primarily reduces **compilation time**, not binary size. Modern compilers typically inline hot paths anyway using their own heuristics, so binary size reduction is often minimal. Forced inlining is automatically disabled in debug builds (when `NDEBUG` is not defined).
+
+## Reducing Binary Size
+
+### Optimization Levels
+
+Glaze provides an `optimization_level` option for controlling the trade-off between binary size and performance. For embedded systems, WebAssembly, or mobile apps where binary size matters:
+
+```cpp
+// Use the size-optimized preset
+auto ec = glz::read<glz::opts_size{}>(value, buffer);
+auto json = glz::write<glz::opts_size{}>(obj);
+```
+
+The `size` optimization level:
+
+- Uses `std::to_chars` instead of lookup tables for number serialization
+- Defaults to linear search for key matching
+- Can reduce binary size by ~280KB or more
+
+See [Optimization Levels](optimization-levels.md) for full details on available levels and their characteristics.
+
+### Linear Search Option
+
+For finer control, you can enable linear search independently:
+
+```cpp
+struct small_binary_opts : glz::opts {
+   bool linear_search = true;  // Use linear key search instead of hash tables
+};
+
+auto ec = glz::read<small_binary_opts{}>(value, buffer);
+```
+
+This provides significant binary size reduction (typically 40-50% smaller than default) by:
+- Using fold-expression dispatch instead of jump tables
+- Eliminating hash table generation for each struct type
+- Reducing template instantiation bloat
+
+The trade-off is slightly slower parsing for objects with many fields, though performance remains competitive with other JSON libraries. For objects with few fields (< 10), the difference is negligible.
+
 ## Best Data Structures/Layout
 
 It is typically best to match the JSON and C++ object layout. C++ structs should mimic JSON objects, and vice versa.

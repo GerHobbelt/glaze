@@ -1385,4 +1385,622 @@ suite shared_ptr_variant_tests = [] {
    };
 };
 
+// Test for GitHub issue #2172
+// Empty struct in tagged variant roundtrip
+namespace tagged_empty_variant
+{
+   struct EmptyA
+   {
+      bool operator==(const EmptyA&) const = default;
+   };
+
+   using VariantWithEmpty = std::variant<EmptyA>;
+
+   struct Wrapper
+   {
+      VariantWithEmpty v;
+      bool operator==(const Wrapper&) const = default;
+   };
+}
+
+template <>
+struct glz::meta<tagged_empty_variant::EmptyA>
+{
+   static constexpr auto value = glz::object();
+};
+
+template <>
+struct glz::meta<tagged_empty_variant::VariantWithEmpty>
+{
+   static constexpr std::string_view tag = "tag";
+   static constexpr auto ids = std::array{"A"};
+};
+
+template <>
+struct glz::meta<tagged_empty_variant::Wrapper>
+{
+   static constexpr auto value = glz::object(&tagged_empty_variant::Wrapper::v);
+};
+
+suite empty_struct_variant_roundtrip = [] {
+   "empty struct variant roundtrip minified"_test = [] {
+      tagged_empty_variant::Wrapper x{tagged_empty_variant::EmptyA{}};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+      expect(buffer == R"({"v":{"tag":"A"}})") << buffer;
+
+      tagged_empty_variant::Wrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(parsed == x);
+   };
+
+   "empty struct variant roundtrip prettified"_test = [] {
+      tagged_empty_variant::Wrapper x{tagged_empty_variant::EmptyA{}};
+      std::string buffer{};
+      expect(not glz::write<glz::opts{.prettify = true}>(x, buffer));
+
+      // Verify no extra blank lines in prettified output
+      expect(buffer == R"({
+   "v": {
+      "tag": "A"
+   }
+})") << buffer;
+
+      tagged_empty_variant::Wrapper parsed{};
+      auto ec = glz::read<glz::opts{.prettify = true}>(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(parsed == x);
+   };
+
+   "empty struct variant full roundtrip"_test = [] {
+      // Test that write -> read roundtrip works for both minified and prettified
+      tagged_empty_variant::Wrapper original{tagged_empty_variant::EmptyA{}};
+
+      // Minified roundtrip
+      std::string minified{};
+      expect(not glz::write_json(original, minified));
+      tagged_empty_variant::Wrapper parsed_min{};
+      expect(not glz::read_json(parsed_min, minified)) << minified;
+      expect(parsed_min == original);
+
+      // Prettified roundtrip
+      std::string prettified{};
+      expect(not glz::write<glz::opts{.prettify = true}>(original, prettified));
+      tagged_empty_variant::Wrapper parsed_pretty{};
+      expect(not glz::read<glz::opts{.prettify = true}>(parsed_pretty, prettified)) << prettified;
+      expect(parsed_pretty == original);
+   };
+
+   "empty struct variant direct parsing"_test = [] {
+      // Test parsing the variant directly (not wrapped in another struct)
+      std::string json = R"({"tag":"A"})";
+      tagged_empty_variant::VariantWithEmpty v;
+      auto ec = glz::read_json(v, json);
+      expect(not ec) << glz::format_error(ec, json);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(v));
+   };
+
+   "empty struct variant with extra whitespace"_test = [] {
+      // Test parsing with various whitespace patterns
+      std::string json = R"({  "v"  :  {  "tag"  :  "A"  }  })";
+      tagged_empty_variant::Wrapper parsed{};
+      auto ec = glz::read_json(parsed, json);
+      expect(not ec) << glz::format_error(ec, json);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed.v));
+   };
+};
+
+// Additional test types for more comprehensive coverage
+namespace tagged_variant_extended
+{
+   // Multiple empty struct types in a variant
+   struct EmptyB
+   {
+      bool operator==(const EmptyB&) const = default;
+   };
+
+   struct EmptyC
+   {
+      bool operator==(const EmptyC&) const = default;
+   };
+
+   using MultiEmptyVariant = std::variant<tagged_empty_variant::EmptyA, EmptyB, EmptyC>;
+
+   struct MultiEmptyWrapper
+   {
+      MultiEmptyVariant v;
+      bool operator==(const MultiEmptyWrapper&) const = default;
+   };
+
+   // Mixed variant with empty and non-empty types
+   struct NonEmpty
+   {
+      int x{};
+      std::string y{};
+      bool operator==(const NonEmpty&) const = default;
+   };
+
+   using MixedVariant = std::variant<tagged_empty_variant::EmptyA, NonEmpty>;
+
+   struct MixedWrapper
+   {
+      MixedVariant v;
+      bool operator==(const MixedWrapper&) const = default;
+   };
+
+   // Wrapper with multiple fields including variant
+   struct MultiFieldWrapper
+   {
+      int before{};
+      tagged_empty_variant::VariantWithEmpty v;
+      std::string after{};
+      bool operator==(const MultiFieldWrapper&) const = default;
+   };
+
+   // Nested wrapper
+   struct OuterWrapper
+   {
+      tagged_empty_variant::Wrapper inner;
+      bool operator==(const OuterWrapper&) const = default;
+   };
+}
+
+template <>
+struct glz::meta<tagged_variant_extended::EmptyB>
+{
+   static constexpr auto value = glz::object();
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::EmptyC>
+{
+   static constexpr auto value = glz::object();
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::MultiEmptyVariant>
+{
+   static constexpr std::string_view tag = "type";
+   static constexpr auto ids = std::array{"A", "B", "C"};
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::MultiEmptyWrapper>
+{
+   static constexpr auto value = glz::object(&tagged_variant_extended::MultiEmptyWrapper::v);
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::NonEmpty>
+{
+   static constexpr auto value =
+      glz::object(&tagged_variant_extended::NonEmpty::x, &tagged_variant_extended::NonEmpty::y);
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::MixedVariant>
+{
+   static constexpr std::string_view tag = "kind";
+   static constexpr auto ids = std::array{"empty", "non_empty"};
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::MixedWrapper>
+{
+   static constexpr auto value = glz::object(&tagged_variant_extended::MixedWrapper::v);
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::MultiFieldWrapper>
+{
+   static constexpr auto value =
+      glz::object(&tagged_variant_extended::MultiFieldWrapper::before, &tagged_variant_extended::MultiFieldWrapper::v,
+                  &tagged_variant_extended::MultiFieldWrapper::after);
+};
+
+template <>
+struct glz::meta<tagged_variant_extended::OuterWrapper>
+{
+   static constexpr auto value = glz::object(&tagged_variant_extended::OuterWrapper::inner);
+};
+
+suite empty_struct_variant_extended = [] {
+   using namespace tagged_variant_extended;
+
+   "multiple empty types in variant - type A"_test = [] {
+      MultiEmptyWrapper x{tagged_empty_variant::EmptyA{}};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+      expect(buffer == R"({"v":{"type":"A"}})") << buffer;
+
+      MultiEmptyWrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed.v));
+   };
+
+   "multiple empty types in variant - type B"_test = [] {
+      MultiEmptyWrapper x{EmptyB{}};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+      expect(buffer == R"({"v":{"type":"B"}})") << buffer;
+
+      MultiEmptyWrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<EmptyB>(parsed.v));
+   };
+
+   "multiple empty types in variant - type C"_test = [] {
+      MultiEmptyWrapper x{EmptyC{}};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+      expect(buffer == R"({"v":{"type":"C"}})") << buffer;
+
+      MultiEmptyWrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<EmptyC>(parsed.v));
+   };
+
+   "mixed variant with empty type"_test = [] {
+      MixedWrapper x{tagged_empty_variant::EmptyA{}};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+      expect(buffer == R"({"v":{"kind":"empty"}})") << buffer;
+
+      MixedWrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed.v));
+   };
+
+   "mixed variant with non-empty type"_test = [] {
+      MixedWrapper x{NonEmpty{42, "hello"}};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+
+      MixedWrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<NonEmpty>(parsed.v));
+      expect(std::get<NonEmpty>(parsed.v).x == 42);
+      expect(std::get<NonEmpty>(parsed.v).y == "hello");
+   };
+
+   "multi-field wrapper with empty variant"_test = [] {
+      MultiFieldWrapper x{10, tagged_empty_variant::EmptyA{}, "test"};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+
+      MultiFieldWrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(parsed.before == 10);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed.v));
+      expect(parsed.after == "test");
+   };
+
+   "nested wrapper with empty variant"_test = [] {
+      OuterWrapper x{{tagged_empty_variant::EmptyA{}}};
+      std::string buffer{};
+      expect(not glz::write_json(x, buffer));
+      expect(buffer == R"({"inner":{"v":{"tag":"A"}}})") << buffer;
+
+      OuterWrapper parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed.inner.v));
+   };
+
+   "nested wrapper prettified"_test = [] {
+      OuterWrapper x{{tagged_empty_variant::EmptyA{}}};
+      std::string buffer{};
+      expect(not glz::write<glz::opts{.prettify = true}>(x, buffer));
+
+      OuterWrapper parsed{};
+      auto ec = glz::read<glz::opts{.prettify = true}>(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed.inner.v));
+   };
+
+   "multi-field wrapper field order variations"_test = [] {
+      // Test that field order in JSON doesn't matter
+      std::string json1 = R"({"before":5,"v":{"tag":"A"},"after":"x"})";
+      std::string json2 = R"({"v":{"tag":"A"},"before":5,"after":"x"})";
+      std::string json3 = R"({"after":"x","before":5,"v":{"tag":"A"}})";
+
+      for (const auto& json : {json1, json2, json3}) {
+         MultiFieldWrapper parsed{};
+         auto ec = glz::read_json(parsed, json);
+         expect(not ec) << glz::format_error(ec, json);
+         expect(parsed.before == 5);
+         expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed.v));
+         expect(parsed.after == "x");
+      }
+   };
+
+   "empty variant in array"_test = [] {
+      std::vector<tagged_empty_variant::Wrapper> vec{{tagged_empty_variant::EmptyA{}},
+                                                     {tagged_empty_variant::EmptyA{}}};
+      std::string buffer{};
+      expect(not glz::write_json(vec, buffer));
+      expect(buffer == R"([{"v":{"tag":"A"}},{"v":{"tag":"A"}}])") << buffer;
+
+      std::vector<tagged_empty_variant::Wrapper> parsed{};
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(parsed.size() == 2);
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed[0].v));
+      expect(std::holds_alternative<tagged_empty_variant::EmptyA>(parsed[1].v));
+   };
+};
+
+// ============================================================================
+// Tests for auto-inferred custom types in variants (issue #1641)
+// ============================================================================
+
+// Custom type with glz::custom that reads/writes as a number
+struct Amount
+{
+   double value{};
+   bool operator==(const Amount&) const = default;
+};
+
+template <>
+struct glz::meta<Amount>
+{
+   static constexpr auto read_fn = [](Amount& a, const double& input) { a.value = input; };
+   static constexpr auto write_fn = [](const Amount& a) -> const double& { return a.value; };
+   static constexpr auto value = glz::custom<read_fn, write_fn>;
+};
+
+// Custom type with glz::custom that reads/writes as a string
+struct Label
+{
+   std::string text{};
+   bool operator==(const Label&) const = default;
+   auto operator<=>(const Label&) const = default;
+};
+
+template <>
+struct glz::meta<Label>
+{
+   static constexpr auto read_fn = [](Label& l, const std::string& input) { l.text = input; };
+   static constexpr auto write_fn = [](const Label& l) -> const std::string& { return l.text; };
+   static constexpr auto value = glz::custom<read_fn, write_fn>;
+};
+
+// Custom type with glz::custom that reads/writes as a bool
+struct Flag
+{
+   bool state{};
+   bool operator==(const Flag&) const = default;
+};
+
+template <>
+struct glz::meta<Flag>
+{
+   static constexpr auto read_fn = [](Flag& f, const bool& input) { f.state = input; };
+   static constexpr auto write_fn = [](const Flag& f) -> const bool& { return f.state; };
+   static constexpr auto value = glz::custom<read_fn, write_fn>;
+};
+
+// Custom type using mimic for numeric behavior
+struct MimicNumber
+{
+   int value{};
+   bool operator==(const MimicNumber&) const = default;
+};
+
+template <>
+struct glz::meta<MimicNumber>
+{
+   using mimic = int;
+   static constexpr auto value = &MimicNumber::value;
+};
+
+// Custom type using mimic for string behavior (map key test)
+struct StringKey
+{
+   std::string key{};
+   auto operator<=>(const StringKey&) const = default;
+};
+
+template <>
+struct glz::meta<StringKey>
+{
+   using mimic = std::string;
+   static constexpr auto value = &StringKey::key;
+};
+
+suite auto_inferred_custom_types = [] {
+   "custom_num_t concept check"_test = [] {
+      static_assert(glz::custom_num_t<Amount>);
+      static_assert(!glz::custom_str_t<Amount>);
+      static_assert(!glz::custom_bool_t<Amount>);
+   };
+
+   "custom_str_t concept check"_test = [] {
+      static_assert(glz::custom_str_t<Label>);
+      static_assert(!glz::custom_num_t<Label>);
+      static_assert(!glz::custom_bool_t<Label>);
+   };
+
+   "custom_bool_t concept check"_test = [] {
+      static_assert(glz::custom_bool_t<Flag>);
+      static_assert(!glz::custom_num_t<Flag>);
+      static_assert(!glz::custom_str_t<Flag>);
+   };
+
+   "auto-inferred numeric type in variant"_test = [] {
+      std::variant<std::string, Amount> v;
+
+      // Parse as Amount (number)
+      auto ec = glz::read_json(v, "42.5");
+      expect(not ec) << glz::format_error(ec, "42.5");
+      expect(std::holds_alternative<Amount>(v));
+      expect(std::get<Amount>(v).value == 42.5);
+
+      // Parse as string
+      ec = glz::read_json(v, R"("hello")");
+      expect(not ec) << glz::format_error(ec, R"("hello")");
+      expect(std::holds_alternative<std::string>(v));
+      expect(std::get<std::string>(v) == "hello");
+   };
+
+   "auto-inferred string type in variant"_test = [] {
+      std::variant<int, Label> v;
+
+      // Parse as Label (string)
+      auto ec = glz::read_json(v, R"("world")");
+      expect(not ec) << glz::format_error(ec, R"("world")");
+      expect(std::holds_alternative<Label>(v));
+      expect(std::get<Label>(v).text == "world");
+
+      // Parse as int
+      ec = glz::read_json(v, "123");
+      expect(not ec) << glz::format_error(ec, "123");
+      expect(std::holds_alternative<int>(v));
+      expect(std::get<int>(v) == 123);
+   };
+
+   "auto-inferred bool type in variant"_test = [] {
+      std::variant<std::string, Flag> v;
+
+      // Parse as Flag (bool)
+      auto ec = glz::read_json(v, "true");
+      expect(not ec) << glz::format_error(ec, "true");
+      expect(std::holds_alternative<Flag>(v));
+      expect(std::get<Flag>(v).state == true);
+
+      ec = glz::read_json(v, "false");
+      expect(not ec) << glz::format_error(ec, "false");
+      expect(std::holds_alternative<Flag>(v));
+      expect(std::get<Flag>(v).state == false);
+
+      // Parse as string
+      ec = glz::read_json(v, R"("text")");
+      expect(not ec) << glz::format_error(ec, R"("text")");
+      expect(std::holds_alternative<std::string>(v));
+   };
+
+   "auto-inferred type roundtrip"_test = [] {
+      std::variant<std::string, Amount> v = Amount{99.5};
+      std::string buffer;
+      expect(not glz::write_json(v, buffer));
+      expect(buffer == "99.5") << buffer;
+
+      std::variant<std::string, Amount> parsed;
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(std::holds_alternative<Amount>(parsed));
+      expect(std::get<Amount>(parsed).value == 99.5);
+   };
+
+   "multiple auto-inferred types in variant"_test = [] {
+      std::variant<Amount, Label, Flag> v;
+
+      // Number -> Amount
+      auto ec = glz::read_json(v, "3.14");
+      expect(not ec);
+      expect(std::holds_alternative<Amount>(v));
+
+      // String -> Label
+      ec = glz::read_json(v, R"("test")");
+      expect(not ec);
+      expect(std::holds_alternative<Label>(v));
+
+      // Bool -> Flag
+      ec = glz::read_json(v, "true");
+      expect(not ec);
+      expect(std::holds_alternative<Flag>(v));
+   };
+};
+
+suite mimic_types_in_variants = [] {
+   "mimics_num_t concept check"_test = [] {
+      static_assert(glz::has_mimic<MimicNumber>);
+      static_assert(glz::mimics_num_t<MimicNumber>);
+      static_assert(!glz::mimics_str_t<MimicNumber>);
+   };
+
+   "mimics_str_t concept check"_test = [] {
+      static_assert(glz::has_mimic<StringKey>);
+      static_assert(glz::mimics_str_t<StringKey>);
+      static_assert(!glz::mimics_num_t<StringKey>);
+   };
+
+   "mimic numeric type in variant"_test = [] {
+      std::variant<std::string, MimicNumber> v;
+
+      auto ec = glz::read_json(v, "42");
+      expect(not ec) << glz::format_error(ec, "42");
+      expect(std::holds_alternative<MimicNumber>(v));
+      expect(std::get<MimicNumber>(v).value == 42);
+
+      ec = glz::read_json(v, R"("text")");
+      expect(not ec);
+      expect(std::holds_alternative<std::string>(v));
+   };
+
+   "mimic string type in variant"_test = [] {
+      std::variant<int, StringKey> v;
+
+      auto ec = glz::read_json(v, R"("mykey")");
+      expect(not ec) << glz::format_error(ec, R"("mykey")");
+      expect(std::holds_alternative<StringKey>(v));
+      expect(std::get<StringKey>(v).key == "mykey");
+
+      ec = glz::read_json(v, "100");
+      expect(not ec);
+      expect(std::holds_alternative<int>(v));
+   };
+
+   "mimic string as map key (no double quoting)"_test = [] {
+      std::map<StringKey, int> m{{StringKey{"hello"}, 42}, {StringKey{"world"}, 99}};
+      std::string buffer;
+      expect(not glz::write_json(m, buffer));
+      // Should be {"hello":42,"world":99} not {"\"hello\"":42,...}
+      expect(buffer.find("\"hello\"") != std::string::npos) << buffer;
+      expect(buffer.find("\"\"hello\"\"") == std::string::npos) << buffer;
+
+      std::map<StringKey, int> parsed;
+      auto ec = glz::read_json(parsed, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(parsed.size() == 2);
+      expect(parsed[StringKey{"hello"}] == 42);
+      expect(parsed[StringKey{"world"}] == 99);
+   };
+};
+
+suite custom_type_schema_generation = [] {
+   "schema for auto-inferred numeric type"_test = [] {
+      std::string schema = glz::write_json_schema<Amount>().value_or("error");
+      // Schema uses array format: "type":["number"]
+      expect(schema.find("\"number\"") != std::string::npos) << schema;
+   };
+
+   "schema for auto-inferred string type"_test = [] {
+      std::string schema = glz::write_json_schema<Label>().value_or("error");
+      expect(schema.find("\"string\"") != std::string::npos) << schema;
+   };
+
+   "schema for auto-inferred bool type"_test = [] {
+      std::string schema = glz::write_json_schema<Flag>().value_or("error");
+      expect(schema.find("\"boolean\"") != std::string::npos) << schema;
+   };
+
+   "schema for mimic numeric type"_test = [] {
+      std::string schema = glz::write_json_schema<MimicNumber>().value_or("error");
+      expect(schema.find("\"integer\"") != std::string::npos) << schema;
+   };
+
+   "schema for mimic string type"_test = [] {
+      std::string schema = glz::write_json_schema<StringKey>().value_or("error");
+      expect(schema.find("\"string\"") != std::string::npos) << schema;
+   };
+};
+
 int main() { return 0; }
