@@ -206,6 +206,27 @@ namespace glz
             return;
          }
 
+         // Check for null value skipping on read
+         if constexpr (check_skip_null_members_on_read(Opts)) {
+            if (*it == 'n') {
+               ++it;
+               if constexpr (not Opts.null_terminated) {
+                  if (it == end) [[unlikely]] {
+                     ctx.error = error_code::unexpected_end;
+                     return;
+                  }
+               }
+               match<"ull", Opts>(ctx, it, end);
+               if (bool(ctx.error)) [[unlikely]]
+                  return;
+               // Successfully matched "null", skip it
+               if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+                  ((selected_index = I), ...); // Mark as handled even if skipped
+               }
+               return;
+            }
+         }
+
          // Check for operation-specific skipping
          if constexpr (meta_has_skip<std::remove_cvref_t<T>>) {
             if constexpr (meta<std::remove_cvref_t<T>>::skip(Key, {glz::operation::parse})) {
@@ -556,7 +577,7 @@ namespace glz
             }
          }
 
-         if constexpr (Opts.bools_as_numbers) {
+         if constexpr (check_bools_as_numbers(Opts)) {
             if (*it == '1') {
                value = true;
                ++it;
@@ -2882,7 +2903,7 @@ namespace glz
 
                                  it = start; // we restart our object parsing now that we know the target type
                                  tag_specified_index = type_index; // Store the tag-specified type
-                                 if (value.index() != type_index) value = runtime_variant_map<T>()[type_index];
+                                 if (value.index() != type_index) emplace_runtime_variant(value, type_index);
                                  std::visit(
                                     [&](auto&& v) {
                                        using V = std::decay_t<decltype(v)>;
@@ -2938,7 +2959,7 @@ namespace glz
 
                                     it = start; // we restart our object parsing now that we know the target type
                                     tag_specified_index = type_index; // Store the default type index
-                                    if (value.index() != type_index) value = runtime_variant_map<T>()[type_index];
+                                    if (value.index() != type_index) emplace_runtime_variant(value, type_index);
                                     std::visit(
                                        [&](auto&& v) {
                                           using V = std::decay_t<decltype(v)>;
@@ -3017,7 +3038,7 @@ namespace glz
                               it = start;
                               const auto type_index = id_it->second;
                               tag_specified_index = type_index; // Store the tag-specified type
-                              if (value.index() != type_index) value = runtime_variant_map<T>()[type_index];
+                              if (value.index() != type_index) emplace_runtime_variant(value, type_index);
                               return;
                            }
                            else {
@@ -3029,7 +3050,7 @@ namespace glz
                                  it = start;
                                  const auto type_index = ids_size;
                                  tag_specified_index = type_index; // Store the default type index
-                                 if (value.index() != type_index) value = runtime_variant_map<T>()[type_index];
+                                 if (value.index() != type_index) emplace_runtime_variant(value, type_index);
                                  return;
                               }
                               else {
@@ -3060,7 +3081,7 @@ namespace glz
                            const auto type_index = possible_types.countr_zero();
 
                            if (value.index() != static_cast<size_t>(type_index))
-                              value = runtime_variant_map<T>()[type_index];
+                              emplace_runtime_variant(value, type_index);
                            std::visit(
                               [&](auto&& v) {
                                  using V = std::decay_t<decltype(v)>;
@@ -3139,7 +3160,7 @@ namespace glz
 
                         it = start;
                         if (value.index() != static_cast<size_t>(type_index))
-                           value = runtime_variant_map<T>()[type_index];
+                           emplace_runtime_variant(value, type_index);
                         std::visit(
                            [&](auto&& v) {
                               using V = std::decay_t<decltype(v)>;
@@ -3225,7 +3246,7 @@ namespace glz
                            }
 
                            it = start;
-                           if (value.index() != chosen_index) value = runtime_variant_map<T>()[chosen_index];
+                           if (value.index() != chosen_index) emplace_runtime_variant(value, chosen_index);
                            std::visit(
                               [&](auto&& v) {
                                  using V = std::decay_t<decltype(v)>;
@@ -3334,7 +3355,7 @@ namespace glz
 
                // Try parsing as this type
                if (value.index() != I) {
-                  value = runtime_variant_map<T>()[I];
+                  emplace_runtime_variant(value, I);
                }
 
                std::visit([&](auto&& v) { parse<JSON>::op<Options>(v, ctx, it, end); }, value);
@@ -3424,7 +3445,7 @@ namespace glz
                return;
             }
             const auto type_index = id_it->second;
-            if (value.index() != type_index) value = runtime_variant_map<T>()[type_index];
+            if (value.index() != type_index) emplace_runtime_variant(value, type_index);
             std::visit([&](auto&& v) { parse<JSON>::op<Opts>(v, ctx, it, end); }, value);
             if (bool(ctx.error)) [[unlikely]]
                return;

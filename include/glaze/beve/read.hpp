@@ -504,7 +504,7 @@ namespace glz
          }
 
          if (value.index() != type_index) {
-            value = runtime_variant_map<T>()[type_index];
+            emplace_runtime_variant(value, type_index);
          }
          std::visit([&](auto&& v) { parse<BEVE>::op<Opts>(v, ctx, it, end); }, value);
       }
@@ -1424,6 +1424,17 @@ namespace glz
                         static constexpr auto TargetKey = get<I>(reflect<T>::keys);
                         static constexpr auto Length = TargetKey.size();
                         if ((Length == n) && compare<Length>(TargetKey.data(), key.data())) [[likely]] {
+                           // Check for null value skipping on read
+                           if constexpr (check_skip_null_members_on_read(Opts)) {
+                              if (invalid_end(ctx, it, end)) {
+                                 return;
+                              }
+                              if (uint8_t(*it) == tag::null) {
+                                 ++it; // Skip the null tag
+                                 return;
+                              }
+                           }
+
                            if constexpr (reflectable<T>) {
                               parse<BEVE>::op<Opts>(get_member(value, get<I>(to_tie(value))), ctx, it, end);
                            }

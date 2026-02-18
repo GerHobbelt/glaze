@@ -80,12 +80,10 @@ struct opts
    bool error_on_missing_keys = false;
    // Require all non nullable keys to be present in the object.
    // Use skip_null_members = false to require nullable members
+   // Can be customized per-type using meta<T>::requires_key(key, is_nullable) function
 
    bool error_on_const_read = false;
    // Error if attempt is made to read into a const value, by default the value is skipped without error
-   
-   bool bools_as_numbers = false;
-   // Read and write booleans with 1's and 0's
    
    bool quoted_num = false;
    // Treat numbers as quoted or array-like types as having quoted numbers
@@ -114,6 +112,9 @@ The supported, but not default provided options are listed after `glz::opts` and
 ```c++
 bool validate_skipped = false;
 // If full validation should be performed on skipped values
+
+bool bools_as_numbers = false;
+// Read and write booleans with 1's and 0's
 
 bool write_member_functions = false;
 // Serialize member function pointers referenced in glz::meta instead of skipping them
@@ -173,3 +174,7 @@ Notes:
 - `validate_rectangular`: for 2D arrays, fail reads when row lengths differ (`constraint_violated`).
 - `append_arrays`: appends parsed values to existing containers when supported.
 - Use as a template parameter: `glz::read<glz::opts_csv{.layout = glz::colwise, .use_headers = false}>(...)`.
+
+## See Also
+
+- [Field Validation](field-validation.md) - Customizing required field validation with `requires_key`

@@ -93,6 +93,7 @@ nav:
    - JSON Pointer Syntax: json-pointer-syntax.md
    - JMESPath: JMESPath.md
    - JSON Schema: json-schema.md
+   - Field Validation: field-validation.md
    - Partial Read/Write:
      - Partial Read: partial-read.md
      - Partial Write: partial-write.md
@@ -105,6 +106,7 @@ nav:
    - networking/rest-registry.md
    - networking/tls-support.md
    - networking/http-client.md
+   - networking/websocket-client.md
    - networking/advanced-networking.md
    - networking/http-examples.md
  - Interface Utilities:

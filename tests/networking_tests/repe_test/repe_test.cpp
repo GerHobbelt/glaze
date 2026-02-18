@@ -62,6 +62,48 @@ struct example_functions_t
    };
 };
 
+struct Exhibit
+{
+   std::string name{};
+   int year{};
+
+   struct glaze
+   {
+      using T = Exhibit;
+      static constexpr auto value = glz::object(&T::name, &T::year);
+   };
+};
+
+struct Museum
+{
+   std::string name{};
+   Exhibit main_exhibit{};
+
+   Exhibit get_main_exhibit() { return main_exhibit; }
+   void set_main_exhibit(const Exhibit& exhibit) { main_exhibit = exhibit; }
+
+   struct glaze
+   {
+      using T = Museum;
+      static constexpr auto value = glz::object(&T::name, &T::main_exhibit, &T::get_main_exhibit, &T::set_main_exhibit);
+   };
+};
+
+struct VolatileData
+{
+   volatile int i = 10;
+   volatile double d = 3.14;
+
+   int get_i() volatile { return i; }
+   void inc_i() volatile { ++i; }
+
+   struct glaze
+   {
+      using T = VolatileData;
+      static constexpr auto value = glz::object(&T::i, &T::d, &T::get_i, &T::inc_i);
+   };
+};
+
 suite structs_of_functions = [] {
    "structs_of_functions"_test = [] {
       glz::registry server{};
@@ -85,6 +127,12 @@ suite structs_of_functions = [] {
 
       server.call(repe::request_json({"/get_number"}), response);
       expect(response.body == R"(42)");
+
+      server.call(repe::request_json({""}), response);
+      expect(
+         response.body ==
+         R"({"i":42,"hello":"std::function<std::string_view()>","world":"std::function<std::string_view()>","get_number":"std::function<int32_t()>","void_func":"std::function<void()>","max":"std::function<double(std::vector<double>&)>"})")
+         << response.body;
    };
 
    "nested_structs_of_functions"_test = [] {
@@ -179,6 +227,47 @@ suite structs_of_functions = [] {
       server.call(request, response);
       expect(obj.name == "Alice");
       expect(response.body == "null") << response.body;
+
+      request = repe::request_json({""});
+      server.call(request, response);
+      expect(response.body == R"({"name":"Alice","custom_name":"Alice"})") << response.body;
+   };
+
+   "volatile_member_functions_test"_test = [] {
+      struct opts_with_write_member_functions : glz::opts
+      {
+         bool write_member_functions = true;
+      };
+
+      glz::registry<opts_with_write_member_functions{}> server{};
+      VolatileData obj{};
+
+      server.on(obj);
+
+      repe::message response{};
+
+      // Test reading volatile data member
+      server.call(repe::request_json({"/i"}), response);
+      expect(response.body == "10");
+
+      // Test calling volatile member function
+      server.call(repe::request_json({"/get_i"}), response);
+      expect(response.body == "10");
+
+      // Test calling volatile void member function (modifier)
+      server.call(repe::request_json({"/inc_i"}), response);
+      expect(response.body == "null");
+
+      // Verify change
+      server.call(repe::request_json({"/i"}), response);
+      expect(response.body == "11");
+
+      // Test empty query with write_member_functions=true
+      server.call(repe::request_json({""}), response);
+      expect(
+         response.body ==
+         R"=({"i":11,"d":3.14,"get_i":"int (VolatileData::*)() volatile","inc_i":"void (VolatileData::*)() volatile"})=")
+         << response.body;
    };
 };
 
@@ -722,6 +811,302 @@ suite id_preservation_tests = [] {
       expect(response.header.ec == glz::error_code::none);
       expect(response.header.id == 99999) << "ID should be preserved in successful response";
       expect(response.body == R"(42)");
+   };
+};
+
+struct inner_t
+{
+   int val = 10;
+   int get_val() { return val; }
+
+   struct glaze
+   {
+      using T = inner_t;
+      static constexpr auto value = glz::object(&T::val, &T::get_val);
+   };
+};
+
+struct middle_t
+{
+   inner_t inner{};
+   std::string name = "mid";
+   std::string_view get_name() { return name; }
+
+   struct glaze
+   {
+      using T = middle_t;
+      static constexpr auto value = glz::object(&T::inner, &T::name, &T::get_name);
+   };
+};
+
+struct outer_t
+{
+   middle_t middle{};
+   double score = 3.14;
+   void set_score(double s) { score = s; }
+
+   struct glaze
+   {
+      using T = outer_t;
+      static constexpr auto value = glz::object(&T::middle, &T::score, &T::set_score);
+   };
+};
+
+suite deeply_nested_tests = [] {
+   "nested_mix_test"_test = [] {
+      glz::registry server{};
+      outer_t obj{};
+      server.on(obj);
+
+      // Modify some values to ensure we get current state
+      obj.middle.inner.val = 99;
+      obj.middle.name = "modified_mid";
+      obj.score = 1.23;
+
+      repe::message request{};
+      repe::message response{};
+
+      request = repe::request_json({""});
+      server.call(request, response);
+
+      expect(response.body == R"({"middle":{"inner":{"val":99},"name":"modified_mid"},"score":1.23})") << response.body;
+   };
+
+   "nested_mix_write_member_functions_test"_test = [] {
+      struct opts_with_write_member_functions : glz::opts
+      {
+         bool write_member_functions = true;
+      };
+
+      glz::registry<opts_with_write_member_functions{}> server{};
+      outer_t obj{};
+      server.on(obj);
+
+      // Modify some values
+      obj.middle.inner.val = 99;
+      obj.middle.name = "modified_mid";
+      obj.score = 1.23;
+
+      repe::message request{};
+      repe::message response{};
+
+      request = repe::request_json({""});
+      server.call(request, response);
+
+      expect(
+         response.body ==
+         R"e({"middle":{"inner":{"val":99,"get_val":"int32_t (inner_t::*)()"},"name":"modified_mid","get_name":"std::string_view (middle_t::*)()"},"score":1.23,"set_score":"void (outer_t::*)(double)"})e")
+         << response.body;
+   };
+
+   "museum_member_functions_test"_test = [] {
+      struct opts_with_write_member_functions : glz::opts
+      {
+         bool write_member_functions = true;
+      };
+
+      glz::registry<opts_with_write_member_functions{}> server{};
+      Museum museum{};
+      museum.name = "The Louvre";
+      museum.main_exhibit = {"Mona Lisa", 1503};
+
+      server.on(museum);
+
+      repe::message response{};
+
+      // Test reading data member
+      server.call(repe::request_json({"/name"}), response);
+      expect(response.body == R"("The Louvre")");
+
+      // Test calling member function that returns a struct
+      server.call(repe::request_json({"/get_main_exhibit"}), response);
+      expect(response.body == R"({"name":"Mona Lisa","year":1503})") << response.body;
+
+      // Test writing via member function
+      server.call(repe::request_json({.query = "/set_main_exhibit"}, Exhibit{"The Raft of the Medusa", 1819}),
+                  response);
+      expect(response.body == "null");
+
+      // Verify change
+      server.call(repe::request_json({"/main_exhibit"}), response);
+      expect(response.body == R"({"name":"The Raft of the Medusa","year":1819})");
+
+      server.call(repe::request_json({""}), response);
+      expect(
+         response.body ==
+         R"=({"name":"The Louvre","main_exhibit":{"name":"The Raft of the Medusa","year":1819},"get_main_exhibit":"Exhibit (Museum::*)()","set_main_exhibit":"void (Museum::*)(const Exhibit&)"})=")
+         << response.body;
+   };
+};
+
+// Test types for merge functionality
+struct first_object_t
+{
+   int value1 = 42;
+   std::string name1 = "first";
+   int get_value1() { return value1; }
+
+   struct glaze
+   {
+      using T = first_object_t;
+      static constexpr auto value = glz::object(&T::value1, &T::name1, &T::get_value1);
+   };
+};
+
+struct second_object_t
+{
+   double value2 = 3.14;
+   std::string name2 = "second";
+   double get_value2() { return value2; }
+
+   struct glaze
+   {
+      using T = second_object_t;
+      static constexpr auto value = glz::object(&T::value2, &T::name2, &T::get_value2);
+   };
+};
+
+suite merge_tests = [] {
+   "merge_basic"_test = [] {
+      glz::registry server{};
+
+      first_object_t obj1{};
+      second_object_t obj2{};
+
+      auto merged = glz::merge{obj1, obj2};
+      server.on(merged);
+
+      repe::message response{};
+
+      // Test reading from first object
+      server.call(repe::request_json({"/value1"}), response);
+      expect(response.body == "42") << response.body;
+
+      server.call(repe::request_json({"/name1"}), response);
+      expect(response.body == R"("first")") << response.body;
+
+      server.call(repe::request_json({"/get_value1"}), response);
+      expect(response.body == "42") << response.body;
+
+      // Test reading from second object
+      server.call(repe::request_json({"/value2"}), response);
+      expect(response.body == "3.14") << response.body;
+
+      server.call(repe::request_json({"/name2"}), response);
+      expect(response.body == R"("second")") << response.body;
+
+      server.call(repe::request_json({"/get_value2"}), response);
+      expect(response.body == "3.14") << response.body;
+
+      // Test merged root endpoint returns combined view
+      server.call(repe::request_json({""}), response);
+      expect(response.body == R"({"value1":42,"name1":"first","value2":3.14,"name2":"second"})") << response.body;
+   };
+
+   "merge_write_individual_fields"_test = [] {
+      glz::registry server{};
+
+      first_object_t obj1{};
+      second_object_t obj2{};
+
+      auto merged = glz::merge{obj1, obj2};
+      server.on(merged);
+
+      repe::message response{};
+
+      // Write to individual fields should work
+      server.call(repe::request_json({.query = "/value1"}, 100), response);
+      expect(response.body == "null") << response.body;
+
+      server.call(repe::request_json({"/value1"}), response);
+      expect(response.body == "100") << response.body;
+
+      server.call(repe::request_json({.query = "/name2"}, "modified"), response);
+      expect(response.body == "null") << response.body;
+
+      server.call(repe::request_json({"/name2"}), response);
+      expect(response.body == R"("modified")") << response.body;
+   };
+
+   "merge_write_to_root_not_supported"_test = [] {
+      glz::registry server{};
+
+      first_object_t obj1{};
+      second_object_t obj2{};
+
+      auto merged = glz::merge{obj1, obj2};
+      server.on(merged);
+
+      repe::message response{};
+
+      // Writing to merged root should return error
+      server.call(repe::request_json({.query = ""}, R"({"value1":999})"), response);
+      expect(response.header.ec == glz::error_code::invalid_body);
+      expect(response.body.find("not supported") != std::string::npos) << response.body;
+   };
+
+   "merge_with_nested_objects"_test = [] {
+      glz::registry server{};
+
+      Museum museum{};
+      museum.name = "Art Museum";
+      museum.main_exhibit = {"Starry Night", 1889};
+
+      first_object_t obj1{};
+      obj1.value1 = 10;
+
+      auto merged = glz::merge{museum, obj1};
+      server.on(merged);
+
+      repe::message response{};
+
+      // Access nested object from museum
+      server.call(repe::request_json({"/main_exhibit"}), response);
+      expect(response.body == R"({"name":"Starry Night","year":1889})") << response.body;
+
+      server.call(repe::request_json({"/main_exhibit/name"}), response);
+      expect(response.body == R"("Starry Night")") << response.body;
+
+      // Access field from first_object_t
+      server.call(repe::request_json({"/value1"}), response);
+      expect(response.body == "10") << response.body;
+
+      // Root should return merged view
+      server.call(repe::request_json({""}), response);
+      expect(response.body.find("\"name\":\"Art Museum\"") != std::string::npos) << response.body;
+      expect(response.body.find("\"value1\":10") != std::string::npos) << response.body;
+   };
+
+   "merge_beve"_test = [] {
+      glz::registry<glz::opts{.format = glz::BEVE}> server{};
+
+      first_object_t obj1{};
+      second_object_t obj2{};
+
+      auto merged = glz::merge{obj1, obj2};
+      server.on(merged);
+
+      repe::message request{};
+      repe::message response{};
+
+      // Test reading from merged objects with BEVE
+      repe::request_beve({"/value1"}, request);
+      server.call(request, response);
+      std::string res{};
+      expect(!glz::beve_to_json(response.body, res));
+      expect(res == "42") << res;
+
+      repe::request_beve({"/value2"}, request);
+      server.call(request, response);
+      expect(!glz::beve_to_json(response.body, res));
+      expect(res == "3.14") << res;
+
+      // Test merged root with BEVE
+      repe::request_beve({""}, request);
+      server.call(request, response);
+      expect(!glz::beve_to_json(response.body, res));
+      expect(res.find("\"value1\":42") != std::string::npos) << res;
+      expect(res.find("\"value2\":3.14") != std::string::npos) << res;
    };
 };
 

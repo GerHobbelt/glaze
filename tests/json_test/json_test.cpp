@@ -9668,6 +9668,11 @@ struct bools_as_numbers_struct
 };
 
 suite bools_as_numbers_test = [] {
+   struct bools_as_numbers_opts : glz::opts
+   {
+      bool bools_as_numbers = true;
+   };
+
    "bools_as_numbers"_test = [] {
       std::string s = R"({"a":1,"b":0,"c":true,"d":false})";
       bools_as_numbers_struct obj{};
@@ -9680,7 +9685,7 @@ suite bools_as_numbers_test = [] {
    "bools_as_numbers_array"_test = [] {
       std::string s = R"([1,0,1,0])";
       std::array<bool, 4> obj{};
-      constexpr glz::opts opts{.bools_as_numbers = true};
+      constexpr bools_as_numbers_opts opts{};
       expect(!glz::read<opts>(obj, s));
       expect(glz::write<opts>(obj) == s);
    };
@@ -9688,7 +9693,7 @@ suite bools_as_numbers_test = [] {
    "bools_as_numbers_vector"_test = [] {
       std::string s = R"([1,0,1,0])";
       std::vector<bool> obj{};
-      constexpr glz::opts opts{.bools_as_numbers = true};
+      constexpr bools_as_numbers_opts opts{};
       expect(!glz::read<opts>(obj, s));
       expect(glz::write<opts>(obj) == s);
    };
@@ -11061,6 +11066,121 @@ suite member_function_pointer_serialization = [] {
       std::string buffer2{};
       expect(not glz::write<opts_with_member_functions{}>(s, buffer2));
       expect(buffer2 == R"({"f1":"unsigned char (struct_t::*)() const noexcept"})") << buffer2;
+   };
+};
+
+// Test struct for requires_key customization point during parsing
+// Demonstrates making non-nullable fields optional without using std::optional
+struct requires_key_parsing_test
+{
+   int required_field1{};
+   int optional_field{}; // Non-nullable but made optional via requires_key
+   int required_field2{};
+   int reserved_internal{}; // Internal field that shouldn't be required
+};
+
+template <>
+struct glz::meta<requires_key_parsing_test>
+{
+   static constexpr bool requires_key(const std::string_view key, const bool is_nullable)
+   {
+      // Make optional_field not required, even though it's not a nullable type
+      if (key == "optional_field") {
+         return false;
+      }
+      // Make reserved_internal not required
+      if (key == "reserved_internal") {
+         return false;
+      }
+      // All other non-nullable fields are required
+      return !is_nullable;
+   }
+};
+
+// Test struct for mixing nullable types with requires_key
+struct mixed_nullable_and_requires_key_test
+{
+   int required{};
+   std::optional<int> optional_by_type{};
+   int optional_by_key{};
+};
+
+template <>
+struct glz::meta<mixed_nullable_and_requires_key_test>
+{
+   static constexpr bool requires_key(std::string_view key, bool is_nullable)
+   {
+      if (key == "optional_by_key") {
+         return false;
+      }
+      return !is_nullable;
+   }
+};
+
+suite requires_key_parsing_tests = [] {
+   using namespace ut;
+
+   "requires_key allows non-nullable fields to be optional during parsing"_test = [] {
+      // Test 1: All required fields present, optional fields missing
+      {
+         std::string json = R"({"required_field1":1,"required_field2":2})";
+         requires_key_parsing_test obj{};
+         constexpr auto opts = glz::opts{.error_on_missing_keys = true};
+
+         auto ec = glz::read<opts>(obj, json);
+         expect(not ec) << glz::format_error(ec, json);
+         expect(obj.required_field1 == 1);
+         expect(obj.required_field2 == 2);
+         expect(obj.optional_field == 0); // Default value
+         expect(obj.reserved_internal == 0); // Default value
+      }
+
+      // Test 2: Missing a required field should fail
+      {
+         std::string json = R"({"required_field1":1,"optional_field":99})";
+         requires_key_parsing_test obj{};
+         constexpr auto opts = glz::opts{.error_on_missing_keys = true};
+
+         auto ec = glz::read<opts>(obj, json);
+         expect(ec == glz::error_code::missing_key) << glz::format_error(ec, json);
+      }
+
+      // Test 3: All fields present including optional
+      {
+         std::string json = R"({"required_field1":1,"optional_field":99,"required_field2":2,"reserved_internal":77})";
+         requires_key_parsing_test obj{};
+         constexpr auto opts = glz::opts{.error_on_missing_keys = true};
+
+         auto ec = glz::read<opts>(obj, json);
+         expect(not ec) << glz::format_error(ec, json);
+         expect(obj.required_field1 == 1);
+         expect(obj.optional_field == 99);
+         expect(obj.required_field2 == 2);
+         expect(obj.reserved_internal == 77);
+      }
+
+      // Test 4: Only optional fields present should fail
+      {
+         std::string json = R"({"optional_field":99,"reserved_internal":77})";
+         requires_key_parsing_test obj{};
+         constexpr auto opts = glz::opts{.error_on_missing_keys = true};
+
+         auto ec = glz::read<opts>(obj, json);
+         expect(ec == glz::error_code::missing_key);
+      }
+   };
+
+   "requires_key works with nullable types"_test = [] {
+      // All three fields can be missing except 'required'
+      std::string json = R"({"required":42})";
+      mixed_nullable_and_requires_key_test obj{};
+      constexpr auto opts = glz::opts{.error_on_missing_keys = true};
+
+      auto ec = glz::read<opts>(obj, json);
+      expect(not ec) << glz::format_error(ec, json);
+      expect(obj.required == 42);
+      expect(not obj.optional_by_type.has_value());
+      expect(obj.optional_by_key == 0);
    };
 };
 
