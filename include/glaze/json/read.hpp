@@ -23,7 +23,7 @@
 #include "glaze/util/type_traits.hpp"
 #include "glaze/util/variant.hpp"
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 // Turn off MSVC warning for unreachable code due to constexpr branching
 #pragma warning(push)
 #pragma warning(disable : 4702)
@@ -1539,7 +1539,7 @@ namespace glz
                if (*it == ',') {
                   ++it;
 
-                  if constexpr (!Opts.minified) {
+                  if constexpr (!Opts.minified && !Opts.comments) {
                      if (ws_size && ws_size < size_t(end - it)) {
                         skip_matching_ws(ws_start, it, ws_size);
                      }
@@ -1596,7 +1596,7 @@ namespace glz
                   if (*it == ',') [[likely]] {
                      ++it;
 
-                     if constexpr (!Opts.minified) {
+                     if constexpr (!Opts.minified && !Opts.comments) {
                         if (ws_size && ws_size < size_t(end - it)) {
                            skip_matching_ws(ws_start, it, ws_size);
                         }
@@ -2334,7 +2334,8 @@ namespace glz
                      }
                   }
 
-                  if constexpr ((not Opts.minified) && (num_members > 1 || not Opts.error_on_unknown_keys)) {
+                  if constexpr ((not Opts.minified) && (num_members > 1 || not Opts.error_on_unknown_keys) &&
+                                (!Opts.comments)) {
                      if (ws_size && ws_size < size_t(end - it)) {
                         skip_matching_ws(ws_start, it, ws_size);
                      }
@@ -3742,7 +3743,7 @@ namespace glz
    }
 }
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 // restore disabled warnings
 #pragma warning(pop)
 #endif
