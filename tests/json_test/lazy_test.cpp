@@ -9,23 +9,27 @@ using namespace ut;
 // Structs for deserialization tests (must be at namespace scope for reflection)
 namespace lazy_test
 {
-   struct User {
+   struct User
+   {
       std::string name{};
       int age{};
       bool active{};
    };
 
-   struct Address {
+   struct Address
+   {
       std::string city{};
       std::string country{};
    };
 
-   struct Person {
+   struct Person
+   {
       std::string name{};
       Address address{};
    };
 
-   struct Item {
+   struct Item
+   {
       int id{};
       std::string value{};
    };
@@ -256,13 +260,19 @@ suite lazy_json_tests = [] {
       // Sizes differ between 32-bit and 64-bit systems
       if constexpr (sizeof(void*) == 8) {
          // lazy_json_view is 48 bytes: doc* (8) + data* (8) + parse_pos* (8) + key_ (16) + error (4) + padding (4)
-         expect(sizeof(glz::lazy_json_view<glz::opts{}>) == 48u) << "lazy_json_view should be 48 bytes on 64-bit, got " << sizeof(glz::lazy_json_view<glz::opts{}>);
-         expect(sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>) == 48u) << "lazy_json_view should be 48 bytes on 64-bit, got " << sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>);
+         expect(sizeof(glz::lazy_json_view<glz::opts{}>) == 48u)
+            << "lazy_json_view should be 48 bytes on 64-bit, got " << sizeof(glz::lazy_json_view<glz::opts{}>);
+         expect(sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>) == 48u)
+            << "lazy_json_view should be 48 bytes on 64-bit, got "
+            << sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>);
       }
       else {
          // lazy_json_view is 24 bytes: doc* (4) + data* (4) + parse_pos* (4) + key_ (8) + error (4)
-         expect(sizeof(glz::lazy_json_view<glz::opts{}>) == 24u) << "lazy_json_view should be 24 bytes on 32-bit, got " << sizeof(glz::lazy_json_view<glz::opts{}>);
-         expect(sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>) == 24u) << "lazy_json_view should be 24 bytes on 32-bit, got " << sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>);
+         expect(sizeof(glz::lazy_json_view<glz::opts{}>) == 24u)
+            << "lazy_json_view should be 24 bytes on 32-bit, got " << sizeof(glz::lazy_json_view<glz::opts{}>);
+         expect(sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>) == 24u)
+            << "lazy_json_view should be 24 bytes on 32-bit, got "
+            << sizeof(glz::lazy_json_view<glz::opts{.null_terminated = false}>);
       }
    };
 
@@ -351,7 +361,8 @@ suite lazy_json_tests = [] {
 
    "lazy_json_all_escape_sequences"_test = [] {
       // All JSON escape sequences: \" \\ \/ \b \f \n \r \t
-      std::string buffer = R"({"quote":"\"","backslash":"\\","slash":"\/","backspace":"\b","formfeed":"\f","newline":"\n","return":"\r","tab":"\t"})";
+      std::string buffer =
+         R"({"quote":"\"","backslash":"\\","slash":"\/","backspace":"\b","formfeed":"\f","newline":"\n","return":"\r","tab":"\t"})";
       auto result = glz::lazy_json(buffer);
       expect(result.has_value());
 
@@ -368,7 +379,8 @@ suite lazy_json_tests = [] {
 
    "lazy_json_escaped_keys"_test = [] {
       // Keys with escape sequences - lazy_json matches raw JSON keys
-      std::string buffer = R"({"key\nwith\nnewlines":"value1","key\twith\ttabs":"value2","key\"with\"quotes":"value3"})";
+      std::string buffer =
+         R"({"key\nwith\nnewlines":"value1","key\twith\ttabs":"value2","key\"with\"quotes":"value3"})";
       auto result = glz::lazy_json(buffer);
       expect(result.has_value());
 
@@ -418,7 +430,8 @@ suite lazy_json_tests = [] {
 
    "lazy_json_complex_escapes"_test = [] {
       // Complex combinations of escapes
-      std::string buffer = R"({"path":"C:\\Users\\test\\file.txt","json":"{\"nested\":\"value\"}","multi":"line1\nline2\ttabbed"})";
+      std::string buffer =
+         R"({"path":"C:\\Users\\test\\file.txt","json":"{\"nested\":\"value\"}","multi":"line1\nline2\ttabbed"})";
       auto result = glz::lazy_json(buffer);
       expect(result.has_value());
 
@@ -1075,6 +1088,163 @@ suite lazy_json_tests = [] {
 
       auto ec = glz::read_json(user, missing_view);
       expect(bool(ec)); // Should have error
+   };
+};
+
+// ============================================================================
+// Dynamic key serialization using glz::custom with string_view and lazy_json
+// Issue #2230: Using member value as JSON key name
+// ============================================================================
+
+namespace dynamic_key_test
+{
+   struct TaskA
+   {
+      std::string name = "task_a";
+      int val{};
+   };
+
+   struct TaskB
+   {
+      std::string name = "task_b";
+      int val{};
+   };
+
+   struct TaskC
+   {
+      std::string name = "task_c";
+      int val{};
+   };
+
+   struct TopLevel
+   {
+      TaskA a;
+      TaskB b;
+      TaskC c;
+   };
+}
+
+template <>
+struct glz::meta<dynamic_key_test::TopLevel>
+{
+   using T = dynamic_key_test::TopLevel;
+
+   // Helper struct for the value portion (excludes name since it becomes the key)
+   struct TaskVal
+   {
+      int val;
+   };
+
+   // Write using string_view keys to avoid intermediate string allocations
+   // The string_views point to the struct's own name members, which outlive serialization
+   static constexpr auto write_custom = [](const T& self) {
+      return std::vector<std::pair<std::string_view, TaskVal>>{
+         {self.a.name, {self.a.val}}, {self.b.name, {self.b.val}}, {self.c.name, {self.c.val}}};
+   };
+
+   // Read using raw_json_view (no allocation) + lazy_json for efficient iteration
+   static constexpr auto read_custom = [](T& self, const glz::raw_json_view& raw) {
+      auto result = glz::lazy_json(raw.str);
+      if (result) {
+         for (auto item : result->root()) {
+            auto key = item.key(); // std::string_view - no allocation
+            auto val = item["val"].get<int>();
+            if (val) {
+               if (key == self.a.name)
+                  self.a.val = *val;
+               else if (key == self.b.name)
+                  self.b.val = *val;
+               else if (key == self.c.name)
+                  self.c.val = *val;
+            }
+         }
+      }
+   };
+
+   static constexpr auto value = glz::custom<read_custom, write_custom>;
+};
+
+suite dynamic_key_custom_tests = [] {
+   using namespace dynamic_key_test;
+
+   "dynamic_key_write"_test = [] {
+      TopLevel top;
+      top.a.val = 10;
+      top.b.val = 20;
+      top.c.val = 30;
+
+      std::string json{};
+      auto ec = glz::write_json(top, json);
+      expect(not ec) << glz::format_error(ec, json);
+
+      // Verify the output uses the name field values as keys
+      expect(json == R"({"task_a":{"val":10},"task_b":{"val":20},"task_c":{"val":30}})") << json;
+   };
+
+   "dynamic_key_read"_test = [] {
+      TopLevel top;
+      std::string json = R"({"task_a":{"val":100},"task_b":{"val":200},"task_c":{"val":300}})";
+
+      auto ec = glz::read_json(top, json);
+      expect(not ec) << glz::format_error(ec, json);
+
+      expect(top.a.val == 100);
+      expect(top.b.val == 200);
+      expect(top.c.val == 300);
+   };
+
+   "dynamic_key_roundtrip"_test = [] {
+      TopLevel original;
+      original.a.val = 42;
+      original.b.val = 84;
+      original.c.val = 126;
+
+      // Write
+      std::string json{};
+      auto write_ec = glz::write_json(original, json);
+      expect(not write_ec) << glz::format_error(write_ec, json);
+
+      // Read into new object
+      TopLevel parsed;
+      auto read_ec = glz::read_json(parsed, json);
+      expect(not read_ec) << glz::format_error(read_ec, json);
+
+      // Verify values match
+      expect(parsed.a.val == original.a.val);
+      expect(parsed.b.val == original.b.val);
+      expect(parsed.c.val == original.c.val);
+   };
+
+   "dynamic_key_partial_read"_test = [] {
+      TopLevel top;
+      top.a.val = 1;
+      top.b.val = 2;
+      top.c.val = 3;
+
+      // JSON with only some keys present
+      std::string json = R"({"task_b":{"val":999}})";
+
+      auto ec = glz::read_json(top, json);
+      expect(not ec) << glz::format_error(ec, json);
+
+      // Only task_b should be updated
+      expect(top.a.val == 1); // unchanged
+      expect(top.b.val == 999); // updated
+      expect(top.c.val == 3); // unchanged
+   };
+
+   "dynamic_key_different_order"_test = [] {
+      TopLevel top;
+
+      // JSON with keys in different order than struct definition
+      std::string json = R"({"task_c":{"val":3},"task_a":{"val":1},"task_b":{"val":2}})";
+
+      auto ec = glz::read_json(top, json);
+      expect(not ec) << glz::format_error(ec, json);
+
+      expect(top.a.val == 1);
+      expect(top.b.val == 2);
+      expect(top.c.val == 3);
    };
 };
 

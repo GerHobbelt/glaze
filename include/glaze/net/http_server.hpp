@@ -9,6 +9,7 @@
 #include <charconv>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <expected>
 #include <functional>
 #include <future>
@@ -526,6 +527,87 @@ namespace glz
       /**
        * @brief Construct an HTTP server
        *
+       * @param executor Optional external asio executor to use. If using a
+       *                 default-constructed asio::any_io_executor() without target
+       *                 executor, it creates its own io_context.  Using an external
+       *                 executor allows sharing the io_context and its event loop with
+       *                 other asio-based components or managing the io_context lifecycle
+       *                 externally.
+       *
+       * @note When using an external executor, no worker threads are created by start().
+       *       The caller is responsible for running the executor (e.g., calling io_context::run()
+       *       from their own threads).
+       *
+       * @param custom_error_handler Optional error handler for server errors.
+       *                             If not provided, uses a default handler that prints
+       *                             to stderr.
+       *
+       * Example with internal io_context (default):
+       * @code
+       * glz::http_server server;
+       * server.bind(8080);
+       * server.start();  // Creates worker threads using hardware_concurrency()
+       * @endcode
+       *
+       * Example with external io_context:
+       * @code
+       * auto io_ctx = std::make_shared<asio::io_context>();
+       * glz::http_server server(io_ctx->get_executor());
+       * server.bind(8080);
+       * server.start(0);  // Pass 0 to skip creating worker threads
+       *
+       * // Run io_context in your own thread(s)
+       * std::thread io_thread([io_ctx]() {
+       *    io_ctx->run();
+       * });
+       *
+       * // ... later ...
+       * server.stop();
+       * io_ctx->stop();
+       * io_thread.join();
+       * @endcode
+       *
+       * Example with custom error handler:
+       * @code
+       * auto error_handler = [](std::error_code ec, std::source_location loc) {
+       *    my_logger.error("Server error at {}:{}: {}",
+       *                    loc.file_name(), loc.line(), ec.message());
+       * };
+       * glz::http_server server({}, error_handler);
+       * @endcode
+       */
+      inline http_server(asio::any_io_executor executor = asio::any_io_executor(),
+                         glz::error_handler custom_error_handler = {})
+         : io_executor(executor)
+      {
+         if (!io_executor) {
+            io_context = std::make_shared<asio::io_context>();
+            io_executor = io_context->get_executor();
+         }
+         if (custom_error_handler) {
+            error_handler = std::move(custom_error_handler);
+         }
+         else {
+            error_handler = [](std::error_code ec, std::source_location loc) {
+               std::fprintf(stderr, "Error at %s:%d: %s\n", loc.file_name(), static_cast<int>(loc.line()),
+                            ec.message().c_str());
+            };
+         }
+
+         // Initialize SSL context for TLS-enabled servers
+         if constexpr (EnableTLS) {
+#ifdef GLZ_ENABLE_SSL
+            ssl_context = std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12);
+            ssl_context->set_default_verify_paths();
+#else
+            static_assert(!EnableTLS, "TLS support requires GLZ_ENABLE_SSL to be defined and OpenSSL to be available");
+#endif
+         }
+      }
+
+      /**
+       * @brief Construct an HTTP server (Legacy Constructor, construct using external io_context)
+       *
        * @param context Optional external io_context to use. If nullptr, creates its own.
        *                Using an external io_context allows sharing the event loop with
        *                other asio-based components or managing the io_context lifecycle
@@ -568,28 +650,14 @@ namespace glz
        * glz::http_server server(nullptr, error_handler);
        * @endcode
        */
-      inline http_server(std::shared_ptr<asio::io_context> context = nullptr,
-                         glz::error_handler custom_error_handler = {})
-         : io_context(context ? context : std::make_shared<asio::io_context>())
+      inline http_server(std::shared_ptr<asio::io_context> context, glz::error_handler custom_error_handler = {})
+         : http_server(context ? context->get_executor() : asio::any_io_executor(), custom_error_handler)
       {
-         if (custom_error_handler) {
-            error_handler = std::move(custom_error_handler);
-         }
-         else {
-            error_handler = [](std::error_code ec, std::source_location loc) {
-               std::fprintf(stderr, "Error at %s:%d: %s\n", loc.file_name(), static_cast<int>(loc.line()),
-                            ec.message().c_str());
-            };
-         }
-
-         // Initialize SSL context for TLS-enabled servers
-         if constexpr (EnableTLS) {
-#ifdef GLZ_ENABLE_SSL
-            ssl_context = std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12);
-            ssl_context->set_default_verify_paths();
-#else
-            static_assert(!EnableTLS, "TLS support requires GLZ_ENABLE_SSL to be defined and OpenSSL to be available");
-#endif
+         // Preserve shared ownership to prevent use-after-free. The delegated constructor
+         // only stores io_context when no executor is provided, but the executor alone
+         // doesn't keep the io_context alive.
+         if (context) {
+            io_context = context;
          }
       }
 
@@ -615,7 +683,7 @@ namespace glz
       {
          try {
             asio::ip::tcp::endpoint endpoint(asio::ip::make_address(address), port);
-            acceptor = std::make_unique<asio::ip::tcp::acceptor>(*io_context, endpoint);
+            acceptor = std::make_unique<asio::ip::tcp::acceptor>(io_executor, endpoint);
          }
          catch (...) {
             error_handler(std::make_error_code(std::errc::address_in_use), std::source_location::current());
@@ -714,9 +782,8 @@ namespace glz
 
          // Start the acceptor
          do_accept();
-
          // Start worker threads (unless explicitly set to 0)
-         if (actual_threads > 0) {
+         if (io_context && actual_threads > 0) {
             threads.reserve(actual_threads);
             for (size_t i = 0; i < actual_threads; ++i) {
                threads.emplace_back([this] {
@@ -758,7 +825,7 @@ namespace glz
          }
 
          // Stop the io_context
-         io_context->stop();
+         if (io_context) io_context->stop();
 
          // Only join threads if we're not in one of the worker threads
          auto current_thread_id = std::this_thread::get_id();
@@ -1221,7 +1288,7 @@ namespace glz
          signal_handling_enabled = true;
 
          // Create signal_set that will handle SIGINT and SIGTERM
-         signals_ = std::make_unique<asio::signal_set>(*io_context, SIGINT, SIGTERM);
+         signals_ = std::make_unique<asio::signal_set>(io_executor, SIGINT, SIGTERM);
 
          // Set up async handler - this properly captures 'this' and integrates with ASIO
          signals_->async_wait([this](std::error_code ec, int signal_number) {
@@ -1318,7 +1385,11 @@ namespace glz
          threads.clear();
       }
 
+      // Get executor for async operations (timers, etc.)
+      asio::any_io_executor get_executor() const { return io_executor; }
+
      private:
+      asio::any_io_executor io_executor;
       std::shared_ptr<asio::io_context> io_context;
       std::unique_ptr<asio::ip::tcp::acceptor> acceptor;
       std::vector<std::thread> threads;
@@ -1344,6 +1415,7 @@ namespace glz
       {
          std::shared_ptr<socket_type> socket;
          std::shared_ptr<asio::streambuf> buffer;
+         std::string body;
          asio::ip::tcp::endpoint remote_endpoint;
          std::shared_ptr<asio::steady_timer> idle_timer;
          uint32_t request_count = 0;
@@ -1612,34 +1684,30 @@ namespace glz
          }
 
          if (content_length > 0) {
-            std::string body;
-            body.reserve(content_length);
-            // Append what's already in the buffer
+            conn->body.resize(content_length);
+            // Copy what's already in the buffer to the body
             const size_t initial_body_size = std::min(content_length, conn->buffer->size());
-            body.append(static_cast<const char*>(conn->buffer->data().data()), initial_body_size);
+            const auto missing_bytes = content_length - initial_body_size;
+            std::memcpy(conn->body.data(), conn->buffer->data().data(), initial_body_size);
             conn->buffer->consume(initial_body_size);
-
-            if (body.length() < content_length) {
-               asio::async_read(*conn->socket, *conn->buffer, asio::transfer_exactly(content_length - body.length()),
-                                [this, conn, method_opt, target, headers, body = std::move(body)](std::error_code ec,
-                                                                                                  size_t) mutable {
+            if (initial_body_size < content_length) {
+               asio::async_read(*conn->socket, asio::buffer(&conn->body[initial_body_size], missing_bytes),
+                                asio::transfer_exactly(missing_bytes),
+                                [this, conn, method_opt, target, headers](std::error_code ec, size_t) {
                                    if (ec) {
                                       error_handler(ec, std::source_location::current());
                                       return;
                                    }
                                    // Append newly read data
-                                   body.append(static_cast<const char*>(conn->buffer->data().data()),
-                                               conn->buffer->size());
-                                   conn->buffer->consume(conn->buffer->size());
-                                   process_full_request_with_conn(conn, *method_opt, target, headers, std::move(body));
+                                   process_full_request_with_conn(conn, *method_opt, target, headers);
                                 });
             }
             else {
-               process_full_request_with_conn(conn, *method_opt, target, headers, std::move(body));
+               process_full_request_with_conn(conn, *method_opt, target, headers);
             }
          }
          else {
-            process_full_request_with_conn(conn, *method_opt, target, headers, "");
+            process_full_request_with_conn(conn, *method_opt, target, headers);
          }
       }
 
@@ -1679,9 +1747,9 @@ namespace glz
       // Process a full request using connection state (new keep-alive aware version)
       inline void process_full_request_with_conn(std::shared_ptr<connection_state> conn, http_method method,
                                                  const std::string& target,
-                                                 const std::unordered_map<std::string, std::string>& headers,
-                                                 std::string body)
+                                                 const std::unordered_map<std::string, std::string>& headers)
       {
+         std::string body = std::move(conn->body);
          // Check for a streaming handler first
          auto handler_it = streaming_handlers_.find(target);
          if (handler_it != streaming_handlers_.end()) {
@@ -1698,13 +1766,18 @@ namespace glz
          request request;
          request.method = method;
          request.target = target;
-         request.headers = headers;
-         request.body = std::move(body);
          request.remote_ip = conn->remote_endpoint.address().to_string();
          request.remote_port = conn->remote_endpoint.port();
 
+         // Parse path and query string from target
+         const auto [path_view, query_string] = split_target(target);
+         request.path = std::string(path_view);
+         request.query = parse_urlencoded(query_string);
+         request.headers = headers;
+         request.body = std::move(body);
+
          // Find a matching route
-         auto [handle, params] = root_router.match(method, target);
+         auto [handle, params] = root_router.match(method, request.path);
 
          // Create the response object
          response response;
@@ -2080,13 +2153,18 @@ namespace glz
          request request;
          request.method = method;
          request.target = target;
-         request.headers = headers;
-         request.body = std::move(body);
          request.remote_ip = remote_endpoint.address().to_string();
          request.remote_port = remote_endpoint.port();
 
+         // Parse path and query string from target
+         const auto [path_view, query_string] = split_target(target);
+         request.path = std::string(path_view);
+         request.query = parse_urlencoded(query_string);
+         request.headers = headers;
+         request.body = std::move(body);
+
          // Find a matching route using http_router::match which handles both exact and parameterized routes
-         auto [handle, params] = root_router.match(method, target);
+         auto [handle, params] = root_router.match(method, request.path);
 
          // Create the response object up front so we can reuse it in fallback flows
          response response;

@@ -22,6 +22,7 @@
 #include "glaze/json/skip.hpp"
 #include "glaze/util/for_each.hpp"
 #include "glaze/util/glaze_fast_float.hpp"
+#include "glaze/util/simple_float.hpp"
 #include "glaze/util/type_traits.hpp"
 #include "glaze/util/variant.hpp"
 
@@ -138,22 +139,6 @@ namespace glz
          }
       }
    };
-
-   // Unless we can mutate the input buffer we need somewhere to store escaped strings for key lookup, etc.
-   // We don't put this in the context because we don't want to continually reallocate.
-   // IMPORTANT: Do not call use this when nested calls may be made that need additional buffers on the same thread.
-   inline std::string& string_buffer() noexcept
-   {
-      static thread_local std::string buffer(256, '\0');
-      return buffer;
-   }
-
-   // We use an error buffer to avoid multiple allocations in the case that errors occur multiple times.
-   inline std::string& error_buffer() noexcept
-   {
-      static thread_local std::string buffer(256, '\0');
-      return buffer;
-   }
 
    template <class T>
       requires(glaze_value_t<T> && !custom_read<T>)
@@ -642,7 +627,7 @@ namespace glz
             return;
          }
          if constexpr (not Opts.null_terminated) {
-            ++ctx.indentation_level;
+            ++ctx.depth;
          }
 
          auto* ptr = reinterpret_cast<typename T::value_type*>(&v);
@@ -668,7 +653,7 @@ namespace glz
          }
          match<']'>(ctx, it);
          if constexpr (not Opts.null_terminated) {
-            --ctx.indentation_level;
+            --ctx.depth;
          }
       }
    };
@@ -706,7 +691,7 @@ namespace glz
       template <auto Opts>
       static void op(bool_t auto&& value, is_context auto&& ctx, auto&& it, auto end) noexcept
       {
-         if constexpr (Opts.quoted_num) {
+         if constexpr (check_quoted_num(Opts)) {
             if (skip_ws<Opts>(ctx, it, end)) {
                return;
             }
@@ -770,7 +755,7 @@ namespace glz
             }
          }
 
-         if constexpr (Opts.quoted_num) {
+         if constexpr (check_quoted_num(Opts)) {
             if constexpr (not Opts.null_terminated) {
                if (it == end) [[unlikely]] {
                   ctx.error = error_code::unexpected_end;
@@ -804,7 +789,7 @@ namespace glz
       template <auto Opts, class It>
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, It&& it, auto end) noexcept
       {
-         if constexpr (Opts.quoted_num) {
+         if constexpr (check_quoted_num(Opts)) {
             if (skip_ws<Opts>(ctx, it, end)) {
                return;
             }
@@ -854,26 +839,46 @@ namespace glz
                   // Hardware may interact with value changes, so we parse into a temporary and assign in one
                   // place
                   V temp;
-                  auto [ptr, ec] = glz::from_chars<Opts.null_terminated>(it, end, temp);
-                  if (ec != std::errc()) [[unlikely]] {
-                     ctx.error = error_code::parse_number_failure;
-                     return;
+                  if constexpr (is_size_optimized(Opts)) {
+                     auto [ptr, ec] = simple_float::from_chars<Opts.null_terminated>(it, end, temp);
+                     if (ec != std::errc{}) [[unlikely]] {
+                        ctx.error = error_code::parse_number_failure;
+                        return;
+                     }
+                     it = ptr;
+                  }
+                  else {
+                     auto [ptr, ec] = glz::from_chars<Opts.null_terminated>(it, end, temp);
+                     if (ec != std::errc()) [[unlikely]] {
+                        ctx.error = error_code::parse_number_failure;
+                        return;
+                     }
+                     it = ptr;
                   }
                   value = temp;
-                  it = ptr;
                }
                else {
-                  auto [ptr, ec] = glz::from_chars<Opts.null_terminated>(it, end, value);
-                  if (ec != std::errc()) [[unlikely]] {
-                     ctx.error = error_code::parse_number_failure;
-                     return;
+                  if constexpr (is_size_optimized(Opts)) {
+                     auto [ptr, ec] = simple_float::from_chars<Opts.null_terminated>(it, end, value);
+                     if (ec != std::errc{}) [[unlikely]] {
+                        ctx.error = error_code::parse_number_failure;
+                        return;
+                     }
+                     it = ptr;
                   }
-                  it = ptr;
+                  else {
+                     auto [ptr, ec] = glz::from_chars<Opts.null_terminated>(it, end, value);
+                     if (ec != std::errc()) [[unlikely]] {
+                        ctx.error = error_code::parse_number_failure;
+                        return;
+                     }
+                     it = ptr;
+                  }
                }
             }
          }
 
-         if constexpr (Opts.quoted_num) {
+         if constexpr (check_quoted_num(Opts)) {
             if constexpr (not Opts.null_terminated) {
                if (it == end) [[unlikely]] {
                   ctx.error = error_code::unexpected_end;
@@ -909,7 +914,7 @@ namespace glz
          requires(check_is_padded(Opts))
       static void op(auto& value, is_context auto&& ctx, It&& it, End end)
       {
-         if constexpr (Opts.number) {
+         if constexpr (check_string_as_number(Opts)) {
             auto start = it;
             skip_number<Opts>(ctx, it, end);
             if (bool(ctx.error)) [[unlikely]] {
@@ -930,7 +935,7 @@ namespace glz
                }
             }
 
-            if constexpr (not Opts.raw_string) {
+            if constexpr (not check_raw_string(Opts)) {
                static constexpr auto string_padding_bytes = 8;
 
                auto start = it;
@@ -1050,7 +1055,7 @@ namespace glz
          requires(not check_is_padded(Opts))
       static void op(auto& value, is_context auto&& ctx, It&& it, End end)
       {
-         if constexpr (Opts.number) {
+         if constexpr (check_string_as_number(Opts)) {
             auto start = it;
             skip_number<Opts>(ctx, it, end);
             if (bool(ctx.error)) [[unlikely]] {
@@ -1075,7 +1080,7 @@ namespace glz
                }
             }
 
-            if constexpr (not Opts.raw_string) {
+            if constexpr (not check_raw_string(Opts)) {
                static constexpr auto string_padding_bytes = 8;
 
                if (size_t(end - it) >= 8) {
@@ -1339,7 +1344,7 @@ namespace glz
          requires(check_is_padded(Opts))
       static void op(auto& value, is_context auto&& ctx, It&& it, End end)
       {
-         if constexpr (Opts.number) {
+         if constexpr (check_string_as_number(Opts)) {
             auto start = it;
             skip_number<Opts>(ctx, it, end);
             if (bool(ctx.error)) [[unlikely]] {
@@ -1360,7 +1365,7 @@ namespace glz
                }
             }
 
-            if constexpr (not Opts.raw_string) {
+            if constexpr (not check_raw_string(Opts)) {
                static constexpr auto string_padding_bytes = 8;
 
                auto start = it;
@@ -1480,7 +1485,7 @@ namespace glz
          requires(not check_is_padded(Opts))
       static void op(auto& value, is_context auto&& ctx, It&& it, End end)
       {
-         if constexpr (Opts.number) {
+         if constexpr (check_string_as_number(Opts)) {
             auto start = it;
             skip_number<Opts>(ctx, it, end);
             if (bool(ctx.error)) [[unlikely]] {
@@ -1505,7 +1510,7 @@ namespace glz
                }
             }
 
-            if constexpr (not Opts.raw_string) {
+            if constexpr (not check_raw_string(Opts)) {
                static constexpr auto string_padding_bytes = 8;
 
                if (size_t(end - it) >= 8) {
@@ -2083,7 +2088,7 @@ namespace glz
             return;
          }
          if constexpr (not Opts.null_terminated) {
-            ++ctx.indentation_level;
+            ++ctx.depth;
          }
          if (skip_ws<Opts>(ctx, it, end)) {
             return;
@@ -2092,7 +2097,7 @@ namespace glz
          value.clear();
          if (*it == ']') [[unlikely]] {
             if constexpr (not Opts.null_terminated) {
-               --ctx.indentation_level;
+               --ctx.depth;
             }
             ++it;
             return;
@@ -2110,7 +2115,7 @@ namespace glz
             }
             if (*it == ']') {
                if constexpr (not Opts.null_terminated) {
-                  --ctx.indentation_level;
+                  --ctx.depth;
                }
                ++it;
                return;
@@ -2144,7 +2149,7 @@ namespace glz
             return;
          }
          if constexpr (not Opts.null_terminated) {
-            ++ctx.indentation_level;
+            ++ctx.depth;
          }
 
          const auto ws_start = it;
@@ -2154,7 +2159,7 @@ namespace glz
 
          if (*it == ']') {
             if constexpr (not Opts.null_terminated) {
-               --ctx.indentation_level;
+               --ctx.depth;
             }
             ++it;
             if constexpr ((resizable<T> || is_inplace_vector<T>) && not check_append_arrays(Opts)) {
@@ -2197,7 +2202,7 @@ namespace glz
                }
                else if (*it == ']') {
                   if constexpr (not Opts.null_terminated) {
-                     --ctx.indentation_level;
+                     --ctx.depth;
                   }
                   ++it;
                   if constexpr (erasable<T>) {
@@ -2293,7 +2298,7 @@ namespace glz
                   }
                   else if (*it == ']') {
                      if constexpr (not Opts.null_terminated) {
-                        --ctx.indentation_level;
+                        --ctx.depth;
                      }
                      ++it;
                      return;
@@ -2333,7 +2338,7 @@ namespace glz
                }
             }
             if constexpr (not Opts.null_terminated) {
-               ++ctx.indentation_level;
+               ++ctx.depth;
             }
          }
 
@@ -2348,7 +2353,7 @@ namespace glz
             if (*it == '}') {
                ++it;
                if constexpr (not Opts.null_terminated) {
-                  --ctx.indentation_level;
+                  --ctx.depth;
                }
                if constexpr (not Opts.null_terminated) {
                   if (it == end) {
@@ -2505,7 +2510,7 @@ namespace glz
             return;
          }
          if constexpr (not Opts.null_terminated) {
-            ++ctx.indentation_level;
+            ++ctx.depth;
          }
          const auto n = number_of_array_elements<Opts>(ctx, it, end);
          if (bool(ctx.error)) [[unlikely]]
@@ -2529,7 +2534,7 @@ namespace glz
          }
          match<']'>(ctx, it);
          if constexpr (not Opts.null_terminated) {
-            --ctx.indentation_level;
+            --ctx.depth;
          }
       }
    };
@@ -2560,7 +2565,7 @@ namespace glz
             return;
          }
          if constexpr (not Opts.null_terminated) {
-            ++ctx.indentation_level;
+            ++ctx.depth;
          }
          if (skip_ws<Opts>(ctx, it, end)) {
             return;
@@ -2572,7 +2577,7 @@ namespace glz
 
             if (*it == ']') {
                if constexpr (not Opts.null_terminated) {
-                  --ctx.indentation_level;
+                  --ctx.depth;
                }
                return;
             }
@@ -2612,7 +2617,7 @@ namespace glz
                return;
             match<']'>(ctx, it);
             if constexpr (not Opts.null_terminated) {
-               --ctx.indentation_level;
+               --ctx.depth;
             }
             if constexpr (not Opts.null_terminated) {
                if (it == end) {
@@ -2640,7 +2645,7 @@ namespace glz
             return;
          }
          if constexpr (not Opts.null_terminated) {
-            ++ctx.indentation_level;
+            ++ctx.depth;
          }
 
          std::string& s = string_buffer();
@@ -2670,7 +2675,7 @@ namespace glz
             }
             if (*it == ']') {
                if constexpr (not Opts.null_terminated) {
-                  --ctx.indentation_level;
+                  --ctx.depth;
                }
                ++it;
                if constexpr (not Opts.null_terminated) {
@@ -2750,7 +2755,7 @@ namespace glz
                return;
             }
             if constexpr (not Opts.null_terminated) {
-               ++ctx.indentation_level;
+               ++ctx.depth;
             }
          }
          if (skip_ws<Opts>(ctx, it, end)) {
@@ -2759,7 +2764,7 @@ namespace glz
 
          if (*it == '}') {
             if constexpr (not Opts.null_terminated) {
-               --ctx.indentation_level;
+               --ctx.depth;
             }
             if constexpr (Opts.error_on_missing_keys) {
                ctx.error = error_code::missing_key;
@@ -2808,7 +2813,7 @@ namespace glz
 
          match<'}'>(ctx, it);
          if constexpr (not Opts.null_terminated) {
-            --ctx.indentation_level;
+            --ctx.depth;
          }
          if constexpr (not Opts.null_terminated) {
             if (it == end) {
@@ -2857,7 +2862,7 @@ namespace glz
                }
             }
             if constexpr (not Opts.null_terminated) {
-               ++ctx.indentation_level;
+               ++ctx.depth;
             }
          }
          const auto ws_start = it;
@@ -2912,7 +2917,7 @@ namespace glz
 
             if (*it == '}') [[likely]] {
                if constexpr (not Opts.null_terminated) {
-                  --ctx.indentation_level;
+                  --ctx.depth;
                }
                if constexpr (glaze_object_t<T> || reflectable<T>) {
                   if constexpr (has_self_constraint_v<T> && !check_skip_self_constraint(Opts)) {
@@ -2990,7 +2995,7 @@ namespace glz
 
                if (*it == '}') {
                   if constexpr (not Opts.null_terminated) {
-                     --ctx.indentation_level;
+                     --ctx.depth;
                   }
                   if constexpr ((glaze_object_t<T> || reflectable<T>) && Opts.error_on_missing_keys) {
                      constexpr auto req_fields = required_fields<T, Opts>();
@@ -3243,10 +3248,10 @@ namespace glz
                      }
                      else if constexpr (std::is_arithmetic_v<Key>) {
                         // prefer over quoted_t below to avoid double parsing of quoted_t
-                        parse<JSON>::op<opt_true<Opts, &opts::quoted_num>>(key_value, ctx, it, end);
+                        parse<JSON>::op<opt_true<Opts, quoted_num_opt_tag{}>>(key_value, ctx, it, end);
                      }
                      else {
-                        parse<JSON>::op<opt_false<Opts, &opts::raw_string>>(quoted_t<Key>{key_value}, ctx, it, end);
+                        parse<JSON>::op<opt_false<Opts, raw_string_opt_tag{}>>(quoted_t<Key>{key_value}, ctx, it, end);
                      }
                      if (bool(ctx.error)) [[unlikely]]
                         return;
@@ -3378,26 +3383,54 @@ namespace glz
    {};
 
    // Count types in variant matching a trait (fold expression, very fast to compile)
+   // Using helper struct instead of IIFE for MSVC compatibility
    template <class Variant, template <class> class Trait>
-   constexpr size_t variant_count_v = []<class... Ts>(std::variant<Ts...>*) {
-      return (size_t(Trait<Ts>::value) + ... + 0);
-   }(static_cast<Variant*>(nullptr));
+   struct variant_count_impl;
+
+   template <template <class> class Trait, class... Ts>
+   struct variant_count_impl<std::variant<Ts...>, Trait>
+   {
+      static constexpr size_t value = (size_t(Trait<Ts>::value) + ... + 0);
+   };
+
+   template <class Variant, template <class> class Trait>
+   constexpr size_t variant_count_v = variant_count_impl<Variant, Trait>::value;
 
    // Get first index matching trait (or variant_npos if none)
+   // Using helper struct instead of IIFE for MSVC compatibility
    template <class Variant, template <class> class Trait>
-   constexpr size_t variant_first_index_v =
-      []<class... Ts, size_t... Is>(std::variant<Ts...>*, std::index_sequence<Is...>) {
+   struct variant_first_index_impl;
+
+   template <template <class> class Trait, class... Ts>
+   struct variant_first_index_impl<std::variant<Ts...>, Trait>
+   {
+      static constexpr size_t find()
+      {
          size_t result = std::variant_npos;
-         // Short-circuit: stops at first match via || fold
-         (void)((Trait<Ts>::value && result == std::variant_npos ? (result = Is, true) : false) || ...);
+         size_t idx = 0;
+         // Short-circuit: find first match
+         ((Trait<Ts>::value && result == std::variant_npos ? (result = idx, ++idx) : ++idx), ...);
          return result;
-      }(static_cast<Variant*>(nullptr), std::make_index_sequence<std::variant_size_v<Variant>>{});
+      }
+      static constexpr size_t value = find();
+   };
+
+   template <class Variant, template <class> class Trait>
+   constexpr size_t variant_first_index_v = variant_first_index_impl<Variant, Trait>::value;
 
    // Count types matching both category trait AND const/non-const filter
+   // Using helper struct instead of IIFE for MSVC compatibility
    template <class Variant, template <class> class Trait, bool IsConst>
-   constexpr size_t variant_filtered_count_v = []<class... Ts>(std::variant<Ts...>*) {
-      return (size_t(Trait<Ts>::value && (glaze_const_value_t<Ts> == IsConst)) + ... + 0);
-   }(static_cast<Variant*>(nullptr));
+   struct variant_filtered_count_impl;
+
+   template <template <class> class Trait, bool IsConst, class... Ts>
+   struct variant_filtered_count_impl<std::variant<Ts...>, Trait, IsConst>
+   {
+      static constexpr size_t value = (size_t(Trait<Ts>::value && (glaze_const_value_t<Ts> == IsConst)) + ... + 0);
+   };
+
+   template <class Variant, template <class> class Trait, bool IsConst>
+   constexpr size_t variant_filtered_count_v = variant_filtered_count_impl<Variant, Trait, IsConst>::value;
 
    // Variant type counts using fold expressions (replaces tuple-based variant_type_count)
    template <class T>
@@ -3557,13 +3590,13 @@ namespace glz
                ctx.error = error_code::unexpected_end;
                return;
             case '{':
-               if (ctx.indentation_level >= max_recursive_depth_limit) {
+               if (ctx.depth >= max_recursive_depth_limit) {
                   ctx.error = error_code::exceeded_max_recursive_depth;
                   return;
                }
                // In the null terminated case this guards for stack overflow
                // Depth counting is done at the object level when not null terminated
-               ++ctx.indentation_level;
+               ++ctx.depth;
 
                ++it;
                if constexpr (not Opts.null_terminated) {
@@ -3586,7 +3619,7 @@ namespace glz
                   if constexpr (Opts.null_terminated) {
                      // In the null terminated case this guards for stack overflow
                      // Depth counting is done at the object level when not null terminated
-                     --ctx.indentation_level;
+                     --ctx.depth;
                   }
                   return;
                }
@@ -3726,7 +3759,7 @@ namespace glz
                                  if constexpr (Opts.null_terminated) {
                                     // In the null terminated case this guards for stack overflow
                                     // Depth counting is done at the object level when not null terminated
-                                    --ctx.indentation_level;
+                                    --ctx.depth;
                                  }
                                  return; // we've decoded our target type
                               }
@@ -3784,7 +3817,7 @@ namespace glz
                                        value);
 
                                     if constexpr (Opts.null_terminated) {
-                                       --ctx.indentation_level;
+                                       --ctx.depth;
                                     }
                                     return;
                                  }
@@ -3857,7 +3890,7 @@ namespace glz
                               },
                               value);
                            if constexpr (Opts.null_terminated) {
-                              --ctx.indentation_level;
+                              --ctx.depth;
                            }
                            return;
                         }
@@ -3943,7 +3976,7 @@ namespace glz
                            if constexpr (Opts.null_terminated) {
                               // In the null terminated case this guards for stack overflow
                               // Depth counting is done at the object level when not null terminated
-                              --ctx.indentation_level;
+                              --ctx.depth;
                            }
                            return; // we've decoded our target type
                         }
@@ -4024,7 +4057,7 @@ namespace glz
                            value);
 
                         if constexpr (Opts.null_terminated) {
-                           --ctx.indentation_level;
+                           --ctx.depth;
                         }
                      }
                      else if (final_matching > 1) {
@@ -4116,7 +4149,7 @@ namespace glz
                               value);
 
                            if constexpr (Opts.null_terminated) {
-                              --ctx.indentation_level;
+                              --ctx.depth;
                            }
                         }
                         else {
@@ -4131,18 +4164,18 @@ namespace glz
                }
                break;
             case '[':
-               if (ctx.indentation_level >= max_recursive_depth_limit) {
+               if (ctx.depth >= max_recursive_depth_limit) {
                   ctx.error = error_code::exceeded_max_recursive_depth;
                   return;
                }
                if constexpr (Opts.null_terminated) {
                   // In the null terminated case this guards for stack overflow
                   // Depth counting is done at the object level when not null terminated
-                  ++ctx.indentation_level;
+                  ++ctx.depth;
                }
                process_variant_alternatives<T, is_variant_array>::template op<Opts>(value, ctx, it, end);
                if constexpr (Opts.null_terminated) {
-                  --ctx.indentation_level;
+                  --ctx.depth;
                }
                break;
             case '"': {
@@ -4238,7 +4271,7 @@ namespace glz
             return;
          }
          if constexpr (not Opts.null_terminated) {
-            ++ctx.indentation_level;
+            ++ctx.depth;
          }
          if (skip_ws<Opts>(ctx, it, end)) {
             return;
@@ -4287,7 +4320,7 @@ namespace glz
          }
          match<']'>(ctx, it);
          if constexpr (not Opts.null_terminated) {
-            --ctx.indentation_level;
+            --ctx.depth;
          }
       }
    };
@@ -4304,9 +4337,24 @@ namespace glz
             }
          }
 
+         auto parse_val = [&] {
+            if constexpr (not std::is_void_v<decltype(*value)>) {
+               if (value) {
+                  parse<JSON>::op<Opts>(*value, ctx, it, end);
+               }
+               else {
+                  value.emplace();
+                  parse<JSON>::op<Opts>(*value, ctx, it, end);
+               }
+            }
+            else {
+               value.emplace();
+            }
+         };
+
          if (*it == '{') {
             if constexpr (not Opts.null_terminated) {
-               ++ctx.indentation_level;
+               ++ctx.depth;
             }
             auto start = it;
             ++it;
@@ -4322,13 +4370,7 @@ namespace glz
             if (*it == '}') {
                it = start;
                // empty object
-               if (value) {
-                  parse<JSON>::op<Opts>(*value, ctx, it, end);
-               }
-               else {
-                  value.emplace();
-                  parse<JSON>::op<Opts>(*value, ctx, it, end);
-               }
+               parse_val();
             }
             else {
                // either we have an unexpected value or we are decoding an object
@@ -4363,30 +4405,18 @@ namespace glz
                   }
                   match<'}'>(ctx, it);
                   if constexpr (not Opts.null_terminated) {
-                     --ctx.indentation_level;
+                     --ctx.depth;
                   }
                }
                else {
                   it = start;
-                  if (value) {
-                     parse<JSON>::op<Opts>(*value, ctx, it, end);
-                  }
-                  else {
-                     value.emplace();
-                     parse<JSON>::op<Opts>(*value, ctx, it, end);
-                  }
+                  parse_val();
                }
             }
          }
          else {
             // this is not an object and therefore cannot be an unexpected value
-            if (value) {
-               parse<JSON>::op<Opts>(*value, ctx, it, end);
-            }
-            else {
-               value.emplace();
-               parse<JSON>::op<Opts>(*value, ctx, it, end);
-            }
+            parse_val();
          }
       }
    };
