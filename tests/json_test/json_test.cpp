@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <atomic>
 #include <bitset>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <random>
 #include <ranges>
 #include <set>
+#include <span>
 #if defined(__STDCPP_FLOAT128_T__)
 #include <stdfloat>
 #endif
@@ -1839,6 +1841,12 @@ suite large_length_range = [] {
    };
 };
 
+// Test struct for issue #2124
+struct RecursiveNode
+{
+   std::unordered_map<std::string, RecursiveNode> children;
+};
+
 suite json_pointer = [] {
    using namespace ut;
 
@@ -1940,6 +1948,15 @@ suite json_pointer = [] {
       auto maybe_id = glz::get_sv_json<"/data/1/id">(json);
       expect(maybe_id.has_value());
       expect(maybe_id.value() == "88") << maybe_id.value();
+   };
+
+   "seek_nonexistent_key_in_map"_test = [] {
+      // Test for issue #2124: seek should not modify the map when key doesn't exist
+      RecursiveNode root;
+      bool found = glz::seek([](auto&) {}, root, "/children/does_not_exist/children/does_not_exist_as_well");
+
+      expect(found == false) << "seek should return false for non-existent path";
+      expect(root.children.empty()) << "seek should not modify the map";
    };
 };
 
@@ -5864,6 +5881,88 @@ suite arbitrary_key_maps = [] {
    };
 };
 
+// Test for issue #1477: Double quoted keys for custom struct json write
+// When a custom type with custom serialization is used as a map key,
+// the mimics<T, std::string> concept prevents double-quoting
+struct mimics_string_key
+{
+   std::string value{};
+
+   [[nodiscard]] std::strong_ordering operator<=>(const mimics_string_key&) const noexcept = default;
+};
+
+template <>
+struct glz::meta<mimics_string_key>
+{
+   using mimic = std::string;
+   static constexpr auto value = &mimics_string_key::value;
+};
+
+// Struct for testing mimics in nested context
+struct mimics_string_nested_struct
+{
+   std::map<mimics_string_key, bool> data;
+
+   bool operator==(const mimics_string_nested_struct&) const = default;
+};
+
+suite mimics_string_key_tests = [] {
+   "mimics<T, std::string> key write"_test = [] {
+      std::map<mimics_string_key, int> m{{{"hello"}, 42}, {{"world"}, 99}};
+
+      std::string buffer{};
+      expect(not glz::write_json(m, buffer));
+      // With using mimic = std::string, the key should be "hello" not "\"hello\""
+      expect(buffer == R"({"hello":42,"world":99})") << buffer;
+   };
+
+   "mimics<T, std::string> key read"_test = [] {
+      std::map<mimics_string_key, int> m{};
+      std::string json = R"({"hello":42,"world":99})";
+
+      expect(not glz::read_json(m, json));
+      expect(m.size() == 2);
+      expect(m[{"hello"}] == 42);
+      expect(m[{"world"}] == 99);
+   };
+
+   "mimics<T, std::string> key roundtrip"_test = [] {
+      std::map<mimics_string_key, std::string> original{{{"key1"}, "value1"}, {{"key2"}, "value2"}};
+
+      std::string buffer{};
+      expect(not glz::write_json(original, buffer));
+
+      std::map<mimics_string_key, std::string> parsed{};
+      expect(not glz::read_json(parsed, buffer));
+
+      expect(parsed.size() == original.size());
+      for (const auto& [key, val] : original) {
+         expect(parsed.contains(key));
+         expect(parsed[key] == val);
+      }
+   };
+
+   "mimics<T, std::string> key in struct"_test = [] {
+      mimics_string_nested_struct obj{.data = {{{"enabled"}, true}, {{"disabled"}, false}}};
+
+      std::string buffer{};
+      expect(not glz::write_json(obj, buffer));
+      expect(buffer == R"({"data":{"disabled":false,"enabled":true}})") << buffer;
+
+      mimics_string_nested_struct parsed{};
+      expect(not glz::read_json(parsed, buffer));
+      expect(parsed == obj);
+   };
+
+   "mimic concepts"_test = [] {
+      // Test that the concepts work correctly
+      static_assert(glz::has_mimic<mimics_string_key>);
+      static_assert(glz::mimics<mimics_string_key, std::string>);
+      static_assert(glz::mimics_str_t<mimics_string_key>);
+      expect(true);
+   };
+};
+
 suite char_array = [] {
    "char array write"_test = [] {
       char arr[12] = "Hello World";
@@ -6728,11 +6827,16 @@ suite write_as_json_raw = [] {
    };
 };
 
+struct error_on_const_read_opts : glz::opts
+{
+   bool error_on_const_read = true;
+};
+
 suite const_read_error = [] {
    "const_read_error"_test = [] {
       const std::string hello = "world";
       std::string s = R"(explode)";
-      constexpr glz::opts opts{.error_on_const_read = true};
+      constexpr error_on_const_read_opts opts{};
       expect(glz::read<opts>(hello, s) == glz::error_code::attempt_const_read);
    };
 };
@@ -7320,6 +7424,49 @@ suite self_constraint_real_world = [] {
          expect(minimal == glz::error_code::none);
          expect(!request.discount_code);
       }
+   };
+};
+
+struct skip_self_constraint_opts : glz::opts
+{
+   bool skip_self_constraint = true;
+};
+
+suite skip_self_constraint_tests = [] {
+   "skip_self_constraint allows invalid data through"_test = [] {
+      constexpr skip_self_constraint_opts opts{};
+
+      // This would normally fail self_constraint validation
+      cross_constrained_object obj{};
+      std::string buffer = R"({"age":9,"name":"Alice"})";
+
+      // With default options, constraint is violated
+      auto ec = glz::read_json(obj, buffer);
+      expect(ec == glz::error_code::constraint_violated);
+
+      // With skip_self_constraint = true, constraint is skipped
+      obj = {};
+      ec = glz::read<opts>(obj, buffer);
+      expect(ec == glz::error_code::none);
+      expect(obj.age == 9);
+      expect(obj.name == "Alice");
+   };
+
+   "skip_self_constraint works with registration_request"_test = [] {
+      constexpr skip_self_constraint_opts opts{};
+
+      registration_request req{};
+      std::string buffer = R"({"username":"coder","password":"short","confirm_password":"short"})";
+
+      // With default options, constraint is violated (password too short)
+      auto ec = glz::read_json(req, buffer);
+      expect(ec == glz::error_code::constraint_violated);
+
+      // With skip_self_constraint = true, constraint is skipped
+      req = {};
+      ec = glz::read<opts>(req, buffer);
+      expect(ec == glz::error_code::none);
+      expect(req.password == "short");
    };
 };
 
@@ -10212,10 +10359,23 @@ suite array_char_tests = [] {
       std::array<char, 8> value{};
       expect(not glz::read_json(value, R"("hello")"));
       expect(std::string_view{value.data()} == "hello");
-      expect(glz::write_json(value).value_or("error") == R"("hello")");
+      // After fix for issue #1760: std::array<char, N> now respects array bounds
+      // instead of scanning for null terminator (which could cause buffer overflow).
+      // The output includes all 8 characters of the array.
+      // Use const char* for null-terminated C-style string semantics.
+      auto result = glz::write_json(value);
+      expect(result.has_value());
+      expect(result->size() > 7) << "Output should include full array contents";
+      expect(result->front() == '"' && result->back() == '"');
       expect(glz::read_json(value, R"("hello---too long")"));
       expect(not glz::read_json(value, R"("bye")"));
       expect(std::string_view{value.data()} == "bye");
+   };
+
+   "const char* for null-terminated strings"_test = [] {
+      // const char* retains null-terminated semantics for C API compatibility
+      const char* cstr = "hello";
+      expect(glz::write_json(cstr).value_or("error") == R"("hello")");
    };
 };
 
@@ -10512,7 +10672,7 @@ suite const_pointer_tests = [] {
       std::string buffer = R"({"name":"Foo Bar","p_add":{"street":"Baz Yaz"}})";
       trr::Address add{};
       trr::Person p{&add};
-      auto ec = glz::read<glz::opts{.format = glz::JSON, .error_on_const_read = true}>(p, buffer);
+      auto ec = glz::read<error_on_const_read_opts{}>(p, buffer);
       if (ec) {
          std::cout << glz::format_error(ec, buffer) << std::endl;
       }
@@ -10616,10 +10776,15 @@ struct glz::meta<append_obj>
    static constexpr auto value = object("names", append_arrays<&T::names>, "arrays", append_arrays<&T::arrays>);
 };
 
+struct append_arrays_opts : glz::opts
+{
+   bool append_arrays = true;
+};
+
 suite append_arrays_tests = [] {
    "append_arrays vector"_test = [] {
       std::vector<int> v{};
-      constexpr glz::opts append_opts{.append_arrays = true};
+      constexpr append_arrays_opts append_opts{};
       expect(not glz::read<append_opts>(v, "[1,2,3]"));
       expect(v == std::vector<int>{1, 2, 3});
       expect(not glz::read<append_opts>(v, "[4,5,6]"));
@@ -10628,7 +10793,7 @@ suite append_arrays_tests = [] {
 
    "append_arrays deque"_test = [] {
       std::deque<int> v{};
-      constexpr glz::opts append_opts{.append_arrays = true};
+      constexpr append_arrays_opts append_opts{};
       expect(not glz::read<append_opts>(v, "[1,2,3]"));
       expect(v == std::deque<int>{1, 2, 3});
       expect(not glz::read<append_opts>(v, "[4,5,6]"));
@@ -11002,6 +11167,84 @@ suite explicit_string_view_support = [] {
       buffer.clear();
       expect(not glz::write<glz::opts{.raw_string = true}>(value, buffer));
       expect(buffer == R"("explicit")");
+   };
+};
+
+suite span_char_serialization = [] {
+   "write json from std::span<const char>"_test = [] {
+      const char data[] = "hello span";
+      std::span<const char> span{data, 10};
+
+      std::string buffer{};
+      expect(not glz::write_json(span, buffer));
+      expect(buffer == R"("hello span")");
+   };
+
+   "write json from std::span<char>"_test = [] {
+      char data[] = "mutable";
+      std::span<char> span{data, 7};
+
+      std::string buffer{};
+      expect(not glz::write_json(span, buffer));
+      expect(buffer == R"("mutable")");
+   };
+
+   "write json from empty std::span<const char>"_test = [] {
+      std::span<const char> span{};
+
+      std::string buffer{};
+      expect(not glz::write_json(span, buffer));
+      expect(buffer == R"("")");
+   };
+
+   "write json from std::span<const char> with raw_string option"_test = [] {
+      const char data[] = "raw span";
+      std::span<const char> span{data, 8};
+
+      std::string buffer{};
+      expect(not glz::write<glz::opts{.raw_string = true}>(span, buffer));
+      expect(buffer == R"("raw span")");
+   };
+
+   "write json from std::array<char, N> without null terminator"_test = [] {
+      // This tests the fix for issue #1760 buffer overflow
+      // Array has no null terminator - must respect array bounds
+      std::array<char, 5> arr = {'h', 'e', 'l', 'l', 'o'};
+
+      std::string buffer{};
+      expect(not glz::write_json(arr, buffer));
+      expect(buffer == R"("hello")") << buffer;
+   };
+
+   "write json from std::array<char, N> with null terminator"_test = [] {
+      // Array contains null terminator as part of the data
+      // The full array size should be used, including the null
+      std::array<char, 6> arr = {'h', 'e', 'l', 'l', 'o', '\0'};
+
+      std::string buffer{};
+      expect(not glz::write_json(arr, buffer));
+      // The null character is included in the output (escaped as \u0000 or similar)
+      expect(buffer.size() > 2) << "Buffer should contain data";
+      expect(buffer.front() == '"' && buffer.back() == '"') << "Should be quoted string";
+   };
+
+   "write json from std::array<char, N> with embedded null"_test = [] {
+      // Array with embedded null - should serialize full array
+      std::array<char, 5> arr = {'a', '\0', 'b', 'c', 'd'};
+
+      std::string buffer{};
+      expect(not glz::write_json(arr, buffer));
+      // Should contain all 5 characters, with embedded null escaped
+      expect(buffer.size() > 2) << buffer;
+   };
+
+   "const char* uses null-terminated semantics"_test = [] {
+      // const char* should still use null-terminated semantics for C API compatibility
+      const char* cstr = "c-string";
+
+      std::string buffer{};
+      expect(not glz::write_json(cstr, buffer));
+      expect(buffer == R"("c-string")") << buffer;
    };
 };
 

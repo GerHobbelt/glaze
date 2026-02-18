@@ -40,7 +40,8 @@ glz::as_array<&T::member> // Treat a reflected/member-annotated type as a positi
 
 When reading into an array that is appendable, the new data will be appended rather than overwrite
 
-Associated option: `glz::opts{.append_arrays = true};`
+Associated option: add `bool append_arrays = true;` to a custom options struct (for example,
+`struct append_arrays_opts : glz::opts { bool append_arrays = true; };`).
 
 ```c++
 struct append_obj
@@ -569,6 +570,26 @@ observes the partially constructed object during parsing—prefer `read_constrai
 constraints fire before the member is written, so the in-memory representation never stores an invalid value. In
 contrast, `self_constraint` runs after fields are populated, so it can detect issues that span multiple members but the
 object may hold the problematic data until the constraint handler reports an error.
+
+### Skipping self_constraint validation
+
+In some cases you may want to skip `self_constraint` validation—for example, when performance is critical and the data
+is known to be valid, or when validation should be deferred to a later stage. You can disable `self_constraint` checks
+by creating a custom options struct with `skip_self_constraint = true`:
+
+```c++
+struct skip_constraint_opts : glz::opts
+{
+   bool skip_self_constraint = true;
+};
+
+// Use it like this:
+constexpr skip_constraint_opts opts{};
+auto ec = glz::read<opts>(obj, buffer);
+```
+
+With this option enabled, the `self_constraint` is still defined in `glz::meta<T>` but will not be evaluated during
+deserialization. This allows you to toggle validation on or off at compile time based on your use case.
 
 ## partial_read
 

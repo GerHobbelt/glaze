@@ -261,6 +261,13 @@ namespace glz
    template <typename SocketType = asio::ip::tcp::socket>
    struct websocket_connection;
 
+   // Base class for type-erased connection closing
+   struct closeable_connection
+   {
+      virtual ~closeable_connection() = default;
+      virtual void force_close() = 0;
+   };
+
    // WebSocket server class
    //
    // Message Handler Lifetime:
@@ -287,6 +294,36 @@ namespace glz
       using validate_handler = std::function<bool(const request&)>;
 
       websocket_server() = default;
+
+      ~websocket_server() { close_all_connections(); }
+
+      // Close all active connections - called on server shutdown
+      void close_all_connections()
+      {
+         std::lock_guard<std::mutex> lock(connections_mutex_);
+         for (auto& weak_conn : connections_) {
+            if (auto conn = weak_conn.lock()) {
+               conn->force_close();
+            }
+         }
+         connections_.clear();
+      }
+
+      // Register a connection for tracking (called by websocket_connection)
+      void register_connection(std::shared_ptr<closeable_connection> conn)
+      {
+         std::lock_guard<std::mutex> lock(connections_mutex_);
+         connections_.push_back(conn);
+      }
+
+      // Remove expired weak_ptrs (optional cleanup, called periodically or on unregister)
+      void cleanup_expired_connections()
+      {
+         std::lock_guard<std::mutex> lock(connections_mutex_);
+         connections_.erase(std::remove_if(connections_.begin(), connections_.end(),
+                                           [](const std::weak_ptr<closeable_connection>& w) { return w.expired(); }),
+                            connections_.end());
+      }
 
       // Configuration
       void set_max_message_size(size_t size) { max_message_size_ = size; }
@@ -353,6 +390,10 @@ namespace glz
       close_handler close_handler_;
       error_handler error_handler_;
       validate_handler validate_handler_;
+
+      // Connection tracking for clean shutdown
+      std::mutex connections_mutex_;
+      std::vector<std::weak_ptr<closeable_connection>> connections_;
    };
 
    // WebSocket connection class - implementations come after websocket_server
@@ -365,11 +406,13 @@ namespace glz
    // is only valid for the duration of the callback. Copy the data if you need to
    // retain it beyond the callback scope.
    template <typename SocketType>
-   struct websocket_connection : public std::enable_shared_from_this<websocket_connection<SocketType>>
+   struct websocket_connection : public closeable_connection,
+                                 public std::enable_shared_from_this<websocket_connection<SocketType>>
    {
      public:
-      inline websocket_connection(std::shared_ptr<SocketType> socket, websocket_server* server = nullptr)
-         : socket_(socket), server_(server)
+      inline websocket_connection(std::shared_ptr<SocketType> socket,
+                                  std::weak_ptr<websocket_server> server = std::weak_ptr<websocket_server>{})
+         : socket_(socket), server_(std::move(server))
       {
          // Try to get remote endpoint, but don't fail if it's not available yet
          try {
@@ -385,12 +428,22 @@ namespace glz
             // Endpoint not available yet (e.g., for client mode before connection)
             // Will be set later if needed
          }
-         if (server_) {
-            max_message_size_ = server_->get_max_message_size();
+         if (auto srv = server_.lock()) {
+            max_message_size_ = srv->get_max_message_size();
          }
       }
 
-      ~websocket_connection() = default;
+      ~websocket_connection()
+      {
+         // Clear handlers first to prevent any callbacks during destruction.
+         // Don't close the socket here - let it close naturally when the shared_ptr
+         // is destroyed. Closing during destruction can cause issues if this destructor
+         // runs during io_context destruction (cancelled operations try to interact
+         // with a destroying io_context).
+         client_message_handler_ = nullptr;
+         client_close_handler_ = nullptr;
+         client_error_handler_ = nullptr;
+      }
 
       // Configuration
       void set_max_message_size(size_t size) { max_message_size_ = size; }
@@ -430,6 +483,34 @@ namespace glz
          // frame, that endpoint SHOULD Close the WebSocket Connection"
          // The socket will be closed when we receive the close response in handle_frame().
          send_close_frame(code, reason, false);
+      }
+
+      // Force close the connection immediately (closes socket without handshake).
+      // Used during server shutdown to ensure clean destruction.
+      void force_close() override
+      {
+         is_closing_ = true;
+         // ALWAYS clear handlers under mutex to prevent callbacks with dangling references.
+         // This races with do_close() which also holds the mutex while calling handlers.
+         // Mutual exclusion ensures either handlers are called OR cleared, never both.
+         {
+            std::lock_guard<std::mutex> lock(close_handler_mutex_);
+            client_message_handler_ = nullptr;
+            client_close_handler_ = nullptr;
+            client_error_handler_ = nullptr;
+         }
+         closed_ = true;
+         // Hold socket_op_mutex_ while closing to prevent race with async_read_some/async_write
+         // setup in do_start_read/do_write. ASIO socket operations are NOT thread-safe.
+         {
+            std::lock_guard<std::mutex> lock(socket_op_mutex_);
+            if (socket_) {
+               asio::error_code ec;
+               socket_->cancel(ec); // Cancel pending operations first
+               socket_->close(ec);
+               socket_.reset();
+            }
+         }
       }
 
       // Get remote endpoint information
@@ -489,9 +570,11 @@ namespace glz
          }
 
          // Check if server wants to validate this connection
-         if (server_ && !server_->validate_connection(req)) {
-            do_close();
-            return;
+         if (auto srv = server_.lock()) {
+            if (!srv->validate_connection(req)) {
+               do_close();
+               return;
+            }
          }
 
          // Generate accept key
@@ -507,8 +590,17 @@ namespace glz
          response_str.append("\r\n\r\n");
 
          auto self = this->shared_from_this();
+
+         // Hold socket_op_mutex_ while setting up the async write operation.
+         // This prevents close() from being called while async_write() is setting up.
+         std::lock_guard<std::mutex> sock_lock(socket_op_mutex_);
+
          // Capture socket locally to prevent race condition
          auto socket = socket_;
+         // Check both pointer validity AND that socket is still open
+         if (!socket || !socket->is_open()) {
+            return;
+         }
 
          // Use shared_ptr to keep response string alive during async operation
          auto response_buffer = std::make_shared<std::string>(std::move(response_str));
@@ -516,8 +608,8 @@ namespace glz
                            [self, req, response_buffer, socket](std::error_code ec, std::size_t) {
                               if (ec) {
                                  self->is_closing_ = true;
-                                 if (self->server_) {
-                                    self->server_->notify_error(self, ec);
+                                 if (auto srv = self->server_.lock()) {
+                                    srv->notify_error(self, ec);
                                  }
                                  self->do_close();
                                  return;
@@ -525,9 +617,10 @@ namespace glz
 
                               self->handshake_complete_ = true;
 
-                              // Notify server of successful connection
-                              if (self->server_) {
-                                 self->server_->notify_open(self, req);
+                              // Register with server for clean shutdown tracking
+                              if (auto srv = self->server_.lock()) {
+                                 srv->register_connection(self);
+                                 srv->notify_open(self, req);
                               }
 
                               // Start reading frames
@@ -539,11 +632,15 @@ namespace glz
       {
          if (ec) {
             is_closing_ = true;
-            if (server_) {
-               server_->notify_error(this->shared_from_this(), ec);
-            }
-            else if (client_error_handler_) {
-               client_error_handler_(ec);
+            // Only call error handlers if not already closed (prevents calling handlers
+            // after force_close() when user's captured references may be invalid)
+            if (!closed_.load()) {
+               if (auto srv = server_.lock()) {
+                  srv->notify_error(this->shared_from_this(), ec);
+               }
+               else if (client_error_handler_) {
+                  client_error_handler_(ec);
+               }
             }
             // Close the connection after a read error (connection is likely broken)
             do_close();
@@ -674,11 +771,15 @@ namespace glz
                }
 
                std::string_view message_view(reinterpret_cast<const char*>(payload), length);
-               if (server_) {
-                  server_->notify_message(this->shared_from_this(), message_view, opcode);
-               }
-               else if (client_message_handler_) {
-                  client_message_handler_(message_view, opcode);
+               // Only call message handlers if not closed (prevents calling handlers
+               // after force_close() when user's captured references may be invalid)
+               if (!closed_.load()) {
+                  if (auto srv = server_.lock()) {
+                     srv->notify_message(this->shared_from_this(), message_view, opcode);
+                  }
+                  else if (client_message_handler_) {
+                     client_message_handler_(message_view, opcode);
+                  }
                }
             }
             else {
@@ -715,11 +816,15 @@ namespace glz
 
                std::string_view message_view(reinterpret_cast<const char*>(message_buffer_.data()),
                                              message_buffer_.size());
-               if (server_) {
-                  server_->notify_message(this->shared_from_this(), message_view, current_opcode_);
-               }
-               else if (client_message_handler_) {
-                  client_message_handler_(message_view, current_opcode_);
+               // Only call message handlers if not closed (prevents calling handlers
+               // after force_close() when user's captured references may be invalid)
+               if (!closed_.load()) {
+                  if (auto srv = server_.lock()) {
+                     srv->notify_message(this->shared_from_this(), message_view, current_opcode_);
+                  }
+                  else if (client_message_handler_) {
+                     client_message_handler_(message_view, current_opcode_);
+                  }
                }
                message_buffer_.clear();
                current_opcode_ = ws_opcode::continuation;
@@ -744,10 +849,11 @@ namespace glz
             close_code_ = code;
             close_reason_ = std::move(reason);
 
-            if (!is_closing_) {
-               // Peer initiated close - mark as closing and send response
+            // Atomically check and set is_closing_ to handle race with close() method
+            bool expected = false;
+            if (is_closing_.compare_exchange_strong(expected, true)) {
+               // Peer initiated close - we successfully marked as closing, send response
                // RFC 6455: "the endpoint MUST send a Close frame in response"
-               is_closing_ = true;
                // Send close frame and schedule socket close after write completes
                send_close_frame(code, {}, true);
             }
@@ -851,8 +957,16 @@ namespace glz
             return;
          }
 
+         // Hold socket_op_mutex_ while setting up the async write operation.
+         // This prevents close() from being called while async_write() is setting up.
+         // ASIO socket operations are NOT thread-safe for concurrent calls.
+         std::lock_guard<std::mutex> sock_lock(socket_op_mutex_);
+
          auto socket = socket_;
-         if (!socket) {
+         // Check both pointer validity AND that socket is still open.
+         // The socket could be closed (is_open() == false) while the shared_ptr is still valid.
+         // Calling async_write on a closed socket crashes in ASIO's reactor.
+         if (!socket || !socket->is_open()) {
             // Socket was closed externally - ensure close callback fires if pending
             bool had_close_pending = false;
             {
@@ -872,7 +986,7 @@ namespace glz
          // Create buffer view before moving frame_buffer into lambda (C++14 evaluation order safety)
          auto buffer_view = asio::buffer(*frame_buffer);
          asio::async_write(*socket, buffer_view,
-                           [self, frame_buffer = std::move(frame_buffer)](std::error_code ec, std::size_t) {
+                           [self, socket, frame_buffer = std::move(frame_buffer)](std::error_code ec, std::size_t) {
                               if (ec) {
                                  // Mark connection as closing before notifying handlers to avoid re-entrant close
                                  // attempts
@@ -883,11 +997,15 @@ namespace glz
                                     self->write_queue_.clear();
                                     self->close_after_write_ = false;
                                  }
-                                 if (self->server_) {
-                                    self->server_->notify_error(self, ec);
-                                 }
-                                 else if (self->client_error_handler_) {
-                                    self->client_error_handler_(ec);
+                                 // Only call error handlers if not already closed (prevents calling handlers
+                                 // after force_close() when user's captured references may be invalid)
+                                 if (!self->closed_.load()) {
+                                    if (auto srv = self->server_.lock()) {
+                                       srv->notify_error(self, ec);
+                                    }
+                                    else if (self->client_error_handler_) {
+                                       self->client_error_handler_(ec);
+                                    }
                                  }
                                  // Close the connection after a write error (connection is likely broken)
                                  self->do_close();
@@ -1014,22 +1132,32 @@ namespace glz
             return; // Already closed
          }
 
-         if (server_) {
-            server_->notify_close(this->shared_from_this(), close_code_, close_reason_);
-         }
-         else if (client_close_handler_) {
-            client_close_handler_(close_code_, close_reason_);
+         // Synchronize with force_close() to prevent calling handlers with dangling references
+         {
+            std::lock_guard<std::mutex> lock(close_handler_mutex_);
+            if (auto srv = server_.lock()) {
+               srv->notify_close(this->shared_from_this(), close_code_, close_reason_);
+            }
+            else if (client_close_handler_) {
+               client_close_handler_(close_code_, close_reason_);
+            }
          }
 
-         if (socket_) {
-            asio::error_code ec;
-            socket_->close(ec);
-            socket_.reset(); // Reset pointer so subsequent checks know socket is closed
+         // Hold socket_op_mutex_ while closing to prevent race with async_read_some/async_write
+         // setup in do_start_read/do_write. ASIO socket operations are NOT thread-safe.
+         {
+            std::lock_guard<std::mutex> lock(socket_op_mutex_);
+            if (socket_) {
+               asio::error_code ec;
+               socket_->cancel(ec); // Cancel pending operations first
+               socket_->close(ec);
+               socket_.reset(); // Reset pointer so subsequent checks know socket is closed
+            }
          }
       }
 
       std::shared_ptr<SocketType> socket_;
-      websocket_server* server_;
+      std::weak_ptr<websocket_server> server_;
       std::array<uint8_t, 16384> read_buffer_;
       std::vector<uint8_t> frame_buffer_;
       std::vector<uint8_t> message_buffer_;
@@ -1052,6 +1180,15 @@ namespace glz
       std::function<void(std::string_view, ws_opcode)> client_message_handler_;
       std::function<void(ws_close_code, std::string_view)> client_close_handler_;
       std::function<void(std::error_code)> client_error_handler_;
+
+      // Mutex to synchronize close handler access between do_close() and force_close()
+      std::mutex close_handler_mutex_;
+
+      // Mutex to prevent race between starting async operations and closing the socket.
+      // ASIO sockets are NOT thread-safe for concurrent operations (e.g., async_read_some
+      // racing with close()). This mutex is held briefly while setting up async ops and
+      // while closing the socket.
+      std::mutex socket_op_mutex_;
 
       // Close code and reason for callback
       ws_close_code close_code_{ws_close_code::normal};
@@ -1080,17 +1217,22 @@ namespace glz
      private:
       inline void do_start_read()
       {
-         // Capture socket locally to prevent race condition
-         auto socket = socket_;
-         if (!socket) {
-            return;
-         }
-
          // Check if already fully closed to avoid operations on closed sockets
          // RFC 6455 Section 7.1.1: Use closed_ (not is_closing_) to allow receiving
          // close response during handshake. The initiator must continue reading.
          // https://datatracker.ietf.org/doc/html/rfc6455#section-7.1.1
          if (closed_.load()) {
+            return;
+         }
+
+         // Hold socket_op_mutex_ while setting up the async read operation.
+         // This prevents close() from being called while async_read_some() is setting up.
+         // ASIO socket operations are NOT thread-safe for concurrent calls.
+         std::lock_guard<std::mutex> lock(socket_op_mutex_);
+
+         // Re-check under lock since socket may have been closed while waiting for mutex
+         auto socket = socket_;
+         if (!socket || !socket->is_open()) {
             return;
          }
 
