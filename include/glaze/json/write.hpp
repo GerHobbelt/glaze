@@ -181,7 +181,7 @@ namespace glz
                   }
                }
                else {
-                  static thread_local auto k = typename std::decay_t<T>::key_type(key);
+                  auto k = typename std::decay_t<T>::key_type(key);
                   auto it = value.find(k);
                   if (it != value.end()) {
                      serialize_partial<JSON>::op<sub_partial, Opts>(it->second, ctx, b, ix);
@@ -1040,6 +1040,8 @@ namespace glz
       }
    };
 
+   // Fallback handler for enums without explicit glz::meta
+   // Serializes as underlying integer unless reflect_enums option is enabled (P2996)
    template <class T>
       requires(!meta_keys<T> && std::is_enum_v<std::decay_t<T>> && !glaze_enum_t<T> && !custom_write<T>)
    struct to<JSON, T>
@@ -1049,9 +1051,31 @@ namespace glz
       template <auto Opts, class... Args>
       GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, Args&&... args)
       {
-         // serialize as underlying number
-         serialize<JSON>::op<Opts>(static_cast<std::underlying_type_t<std::decay_t<T>>>(value), ctx,
-                                   std::forward<Args>(args)...);
+#if GLZ_REFLECTION26
+         if constexpr (check_reflect_enums(Opts)) {
+            // P2996 reflection using reflect_constant_array and expansion statements
+            const sv name = enum_to_string(value);
+            if (!name.empty()) {
+               if constexpr (not check_unquoted(Opts)) {
+                  dump('"', args...);
+               }
+               dump_maybe_empty(name, args...);
+               if constexpr (not check_unquoted(Opts)) {
+                  dump('"', args...);
+               }
+            }
+            else [[unlikely]] {
+               serialize<JSON>::op<Opts>(static_cast<std::underlying_type_t<std::decay_t<T>>>(value), ctx,
+                                         std::forward<Args>(args)...);
+            }
+         }
+         else
+#endif
+         {
+            // Fallback: serialize as underlying number
+            serialize<JSON>::op<Opts>(static_cast<std::underlying_type_t<std::decay_t<T>>>(value), ctx,
+                                      std::forward<Args>(args)...);
+         }
       }
    };
 
@@ -1620,14 +1644,12 @@ namespace glz
    template <always_null_t T>
    struct to<JSON, T>
    {
-      static constexpr bool can_error = false;
-
       template <auto Opts, class B>
-      GLZ_ALWAYS_INLINE static void op(auto&&, is_context auto&&, B&& b, auto& ix)
+      GLZ_ALWAYS_INLINE static void op(auto&&, is_context auto&& ctx, B&& b, auto& ix)
       {
          if constexpr (not check_write_unchecked(Opts)) {
-            if (const auto k = ix + 4; k > b.size()) [[unlikely]] {
-               b.resize(2 * k);
+            if (!ensure_space(ctx, b, ix + 4)) [[unlikely]] {
+               return;
             }
          }
          if constexpr (std::endian::native == std::endian::big) {

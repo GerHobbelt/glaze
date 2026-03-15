@@ -10,7 +10,7 @@ Formats Supported:
 - [CSV](https://stephenberry.github.io/glaze/csv/) (Comma Separated Value) | `glaze/csv.hpp`
 - [MessagePack](https://stephenberry.github.io/glaze/msgpack/) | `glaze/msgpack.hpp`
 - [Stencil/Mustache](https://stephenberry.github.io/glaze/stencil-mustache/) (string interpolation) | `glaze/stencil/stencil.hpp`
-- [TOML](https://stephenberry.github.io/glaze/toml/) (Tom's Obvious, Minimal Language) | `glaze/toml.hpp`
+- [TOML 1.1](https://stephenberry.github.io/glaze/toml/) (Tom's Obvious, Minimal Language) | `glaze/toml.hpp`
 - [YAML](https://stephenberry.github.io/glaze/yaml/) | `glaze/yaml.hpp`
 - [EETF](https://stephenberry.github.io/glaze/EETF/erlang-external-term-format/) (Erlang External Term Format) | `glaze/eetf.hpp`
 - [And Many More Features](https://stephenberry.github.io/glaze/)
@@ -19,22 +19,47 @@ Formats Supported:
 >
 > Glaze is getting HTTP support with REST servers, clients, websockets, and more. The networking side of Glaze is under active development, and while it is usable and feedback is desired, the API is likely to be changing and improving.
 
-> [!IMPORTANT]
->
-> **Breaking Change v7.1.0: `glz::generic` now preserves order of JSON keys.** The underlying map for `glz::generic` switched from `std::map` to `glz::ordered_small_map`, which preserves the order of fields as they are read. Previously keys were lexicographically sorted, so serialization output order may differ. If you need the prior sorted-key behavior, create your own generic specialization using `std::map`:
->
-> ```cpp
-> template <class T>
-> using sorted_map = std::map<std::string, T, std::less<>>;
-> 
-> using sorted_generic = glz::generic_json<glz::num_mode::f64, sorted_map>;
-> ```
-> - This change also improves performance for `glz::generic`, offering faster lookup and iteration for typical JSON sized objects.
-
-## With compile time reflection for MSVC, Clang, and GCC!
+## With C++23 & C++26 compile time reflection for MSVC, Clang, and GCC!
 
 - Read/write aggregate initializable structs without writing any metadata or macros!
 - See [example on Compiler Explorer](https://gcc.godbolt.org/z/T4To5fKfz)
+
+## C++26 P2996 Reflection Support
+
+Glaze now supports [P2996 "Reflection for C++26"](https://wg21.link/P2996). When enabled, P2996 unlocks capabilities that aren't possible with traditional compile-time reflection:
+
+- **Non-aggregate types** — classes with constructors, virtual functions, and inheritance just work
+- **Automatic enum serialization** — no `glz::meta` needed, enums serialize to strings automatically
+- **Unlimited struct members** — no 128-member cap
+- **Private member access** — reflect on all members regardless of access specifiers
+- **Standardized** — no compiler-specific hacks, built on `std::meta`
+
+```cpp
+// Classes with constructors — just works with P2996
+class User {
+public:
+   std::string name;
+   int age;
+   User() = default;
+   User(std::string n, int a) : name(std::move(n)), age(a) {}
+};
+
+User u{"Alice", 30};
+auto json = glz::write_json(u).value_or("error");
+// {"name":"Alice","age":30}
+
+// Enums serialize as strings — no glz::meta required
+enum class Color { Red, Green, Blue };
+Color c = Color::Green;
+
+struct reflect_enums_opts : glz::opts {
+   bool reflect_enums = true;
+};
+auto color_json = glz::write<reflect_enums_opts{}>(c).value_or("error");
+// "Green"
+```
+
+Supported compilers: [GCC 16+](https://gcc.gnu.org/gcc-16/changes.html) (`-std=c++26 -freflection`) and [Bloomberg clang-p2996](https://github.com/bloomberg/clang-p2996). See the [P2996 documentation](https://stephenberry.github.io/glaze/p2996-reflection/) for setup and details.
 
 ## [📖 Documentation](https://stephenberry.github.io/glaze/)
 
@@ -44,6 +69,7 @@ See this README, the [Glaze Documentation Page](https://stephenberry.github.io/g
 
 - Pure, compile time reflection for structs
   - Powerful meta specialization system for custom names and behavior
+  - [C++26 P2996 reflection](https://stephenberry.github.io/glaze/p2996-reflection/) support — non-aggregates, automatic enums, unlimited members
 - JSON [RFC 8259](https://datatracker.ietf.org/doc/html/rfc8259) compliance with UTF-8 validation
 - Standard C++ library support
 - Header only
@@ -267,6 +293,28 @@ set(glaze_DISABLE_ALWAYS_INLINE ON)
 ```
 
 > **Note:** This reduces compilation time and binary size, which can be useful for embedded systems where size is critical. For additional binary size reduction, see Optimization Levels below.
+
+### C++26 P2996 Reflection
+
+Glaze supports [C++26 P2996 reflection](https://wg21.link/P2996) as an alternative backend for struct reflection. This replaces traditional `__PRETTY_FUNCTION__` parsing with standardized reflection primitives.
+
+```cmake
+set(glaze_ENABLE_REFLECTION26 ON)
+```
+
+Requires [GCC 16+](https://gcc.gnu.org/gcc-16/changes.html) or [Bloomberg clang-p2996](https://github.com/bloomberg/clang-p2996) with flags:
+
+**GCC 16+:**
+```bash
+-std=c++26 -freflection
+```
+
+**Bloomberg clang-p2996:**
+```bash
+-std=c++26 -freflection -fexpansion-statements -stdlib=libc++
+```
+
+Benefits include unlimited struct members (vs 128 with traditional reflection), cleaner type names, and future C++ standards compliance. See [P2996 Reflection](https://stephenberry.github.io/glaze/p2996-reflection/) for details.
 
 ### Optimization Levels (Embedded/Size Optimization)
 

@@ -28,6 +28,7 @@ for (auto& [key, value] : m) {
 - **Lookup (>8 entries)**: Sorted hash index with binary search, O(log n)
 - **Heterogeneous lookup**: Supports `std::string_view` and types convertible to it
 - **Bloom filter**: For maps with 9–128 entries, a 128-byte bloom filter accelerates duplicate detection during insertion
+- **Lazy mapped construction**: `try_emplace` only constructs `T` when insertion succeeds
 
 ### API
 
@@ -39,6 +40,7 @@ m["key"] = value;
 m.emplace("key", value);
 m.try_emplace("key", args...);
 m.insert({"key", value});
+m.insert_or_assign("key", value);
 
 // Lookup
 auto it = m.find("key");       // accepts string_view
@@ -161,11 +163,10 @@ By default, `glz::generic` uses `ordered_small_map` for JSON objects. You can su
 // Default: insertion-order preservation with ordered_small_map
 glz::generic json{};
 
-// Lexicographically sorted keys with std::map
-template <class T>
-using sorted_map = std::map<std::string, T, std::less<>>;
-
-using sorted_generic = glz::generic_json<glz::num_mode::f64, sorted_map>;
+// Built-in sorted-key aliases (legacy lexicographic ordering)
+glz::generic_sorted sorted_json{};
+glz::generic_sorted_i64 sorted_json_i64{};
+glz::generic_sorted_u64 sorted_json_u64{};
 
 // Robin Hood hashing with ordered_map
 template <class T>

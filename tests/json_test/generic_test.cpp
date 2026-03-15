@@ -4,8 +4,8 @@
 #include <charconv> // for std::from_chars
 #include <map>
 
-#include "glaze/json.hpp"
 #include "glaze/containers/ordered_map.hpp"
+#include "glaze/json.hpp"
 #include "ut/ut.hpp"
 
 using namespace ut;
@@ -1222,6 +1222,28 @@ suite map_type_tests = [] {
       expect(not glz::write_json(json, out));
       // std::map sorts keys alphabetically
       expect(out == R"({"active":true,"age":30,"name":"Alice"})") << out;
+   };
+
+   "generic_sorted alias uses lexicographic key order"_test = [] {
+      glz::generic_sorted json{};
+      std::string buffer = R"({"name":"Alice","age":30,"active":true})";
+      expect(glz::read_json(json, buffer) == glz::error_code::none);
+
+      std::string out{};
+      expect(not glz::write_json(json, out));
+      expect(out == R"({"active":true,"age":30,"name":"Alice"})") << out;
+   };
+
+   "generic_sorted integer mode aliases preserve numeric storage"_test = [] {
+      glz::generic_sorted_i64 i64_json{};
+      std::string i64_buffer = R"({"value":9007199254740993})";
+      expect(glz::read_json(i64_json, i64_buffer) == glz::error_code::none);
+      expect(i64_json["value"].template get<int64_t>() == 9007199254740993LL);
+
+      glz::generic_sorted_u64 u64_json{};
+      std::string u64_buffer = R"({"value":18446744073709551615})";
+      expect(glz::read_json(u64_json, u64_buffer) == glz::error_code::none);
+      expect(u64_json["value"].template get<uint64_t>() == 18446744073709551615ULL);
    };
 
    "generic_json with ordered_map string_view lookup"_test = [] {

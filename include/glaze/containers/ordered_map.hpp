@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -87,6 +88,27 @@ namespace glz
 
       [[no_unique_address]] Hash hash_;
       [[no_unique_address]] KeyEqual equal_;
+
+      template <class...>
+      struct first_emplace_arg;
+
+      template <class First, class... Rest>
+      struct first_emplace_arg<First, Rest...>
+      {
+         using type = First;
+      };
+
+      template <class... Args>
+      struct emplace_starts_with_key_impl : std::false_type
+      {};
+
+      template <class First, class... Rest>
+      struct emplace_starts_with_key_impl<First, Rest...>
+         : std::bool_constant<std::constructible_from<key_type, typename first_emplace_arg<First, Rest...>::type>>
+      {};
+
+      template <class... Args>
+      static constexpr bool emplace_starts_with_key = emplace_starts_with_key_impl<Args...>::value;
 
       // --- Hash helpers ---
 
@@ -284,7 +306,7 @@ namespace glz
       ordered_map() = default;
 
       explicit ordered_map(size_type bucket_count, const Hash& hash = Hash(), const KeyEqual& equal = KeyEqual(),
-                            const Allocator& alloc = Allocator())
+                           const Allocator& alloc = Allocator())
          : values_(alloc), max_load_factor_(default_max_load_factor), hash_(hash), equal_(equal)
       {
          if (bucket_count > 0) {
@@ -298,14 +320,14 @@ namespace glz
 
       template <class InputIt>
       ordered_map(InputIt first, InputIt last, size_type bucket_count = 0, const Hash& hash = Hash(),
-                   const KeyEqual& equal = KeyEqual(), const Allocator& alloc = Allocator())
+                  const KeyEqual& equal = KeyEqual(), const Allocator& alloc = Allocator())
          : ordered_map(bucket_count, hash, equal, alloc)
       {
          insert(first, last);
       }
 
       ordered_map(std::initializer_list<value_type> init, size_type bucket_count = 0, const Hash& hash = Hash(),
-                   const KeyEqual& equal = KeyEqual(), const Allocator& alloc = Allocator())
+                  const KeyEqual& equal = KeyEqual(), const Allocator& alloc = Allocator())
          : ordered_map(bucket_count, hash, equal, alloc)
       {
          insert(init.begin(), init.end());
@@ -314,9 +336,9 @@ namespace glz
       ordered_map(const ordered_map& other) : values_(other.values_), hash_(other.hash_), equal_(other.equal_)
       {
          if (!values_.empty()) {
-            auto bc = round_up_pow2(
-               static_cast<uint32_t>(std::max(size_type(min_bucket_count),
-                                              static_cast<size_type>(static_cast<float>(values_.size()) / max_load_factor_) + 1)));
+            auto bc = round_up_pow2(static_cast<uint32_t>(
+               std::max(size_type(min_bucket_count),
+                        static_cast<size_type>(static_cast<float>(values_.size()) / max_load_factor_) + 1)));
             bucket_count_ = bc;
             bucket_mask_ = bc - 1;
             load_threshold_ = static_cast<uint32_t>(static_cast<float>(bc) * max_load_factor_);
@@ -411,9 +433,9 @@ namespace glz
          values_.shrink_to_fit();
          // Optionally rehash to minimal bucket count
          if (bucket_count_ > 0) {
-            auto needed = round_up_pow2(
-               static_cast<uint32_t>(std::max(size_type(min_bucket_count),
-                                              static_cast<size_type>(static_cast<float>(values_.size()) / max_load_factor_) + 1)));
+            auto needed = round_up_pow2(static_cast<uint32_t>(
+               std::max(size_type(min_bucket_count),
+                        static_cast<size_type>(static_cast<float>(values_.size()) / max_load_factor_) + 1)));
             if (needed < bucket_count_) {
                rehash_impl(needed);
             }
@@ -451,6 +473,17 @@ namespace glz
       template <class InputIt>
       void insert(InputIt first, InputIt last)
       {
+         if constexpr (std::forward_iterator<InputIt>) {
+            const auto distance = std::distance(first, last);
+            if (distance > 0) {
+               const auto additional = static_cast<size_type>(distance);
+               const auto current = values_.size();
+               const auto max_size = (std::numeric_limits<size_type>::max)();
+               const auto target = (additional > (max_size - current)) ? max_size : (current + additional);
+               reserve(target);
+            }
+         }
+
          for (; first != last; ++first) {
             insert(*first);
          }
@@ -459,6 +492,7 @@ namespace glz
       void insert(std::initializer_list<value_type> ilist) { insert(ilist.begin(), ilist.end()); }
 
       template <class M>
+         requires(std::is_constructible_v<mapped_type, M &&> && std::is_assignable_v<mapped_type&, M &&>)
       std::pair<iterator, bool> insert_or_assign(const key_type& key, M&& obj)
       {
          auto [bucket_idx, stored, found] = insert_to_buckets(key);
@@ -472,6 +506,7 @@ namespace glz
       }
 
       template <class M>
+         requires(std::is_constructible_v<mapped_type, M &&> && std::is_assignable_v<mapped_type&, M &&>)
       std::pair<iterator, bool> insert_or_assign(key_type&& key, M&& obj)
       {
          auto [bucket_idx, stored, found] = insert_to_buckets(key);
@@ -510,6 +545,19 @@ namespace glz
       }
 
       template <class... Args>
+      std::pair<iterator, bool> emplace(const key_type& key, Args&&... args)
+      {
+         return try_emplace(key, std::forward<Args>(args)...);
+      }
+
+      template <class... Args>
+      std::pair<iterator, bool> emplace(key_type&& key, Args&&... args)
+      {
+         return try_emplace(std::move(key), std::forward<Args>(args)...);
+      }
+
+      template <class... Args>
+         requires(std::constructible_from<value_type, Args...> && !emplace_starts_with_key<Args...>)
       std::pair<iterator, bool> emplace(Args&&... args)
       {
          value_type value(std::forward<Args>(args)...);
@@ -519,6 +567,10 @@ namespace glz
       // Ordered erase: preserves insertion order. O(n) because it shifts elements.
       iterator erase(const_iterator pos)
       {
+         if (pos == values_.cend()) [[unlikely]] {
+            return values_.end();
+         }
+
          const auto erased_idx = static_cast<uint32_t>(pos - values_.cbegin());
 
          // Remove from bucket array
@@ -568,12 +620,12 @@ namespace glz
 
       size_type erase(const key_type& key)
       {
-         auto it = find(key);
-         if (it != end()) {
-            erase(it);
-            return 1;
+         const uint32_t bi = find_bucket(key);
+         if (bi == bucket_count_) {
+            return 0;
          }
-         return 0;
+         erase(values_.cbegin() + buckets_[bi].index);
+         return 1;
       }
 
       template <class K>
@@ -581,12 +633,12 @@ namespace glz
                   !std::convertible_to<K, const_iterator>)
       size_type erase(const K& key)
       {
-         auto it = find(key);
-         if (it != end()) {
-            erase(it);
-            return 1;
+         const uint32_t bi = find_bucket(key);
+         if (bi == bucket_count_) {
+            return 0;
          }
-         return 0;
+         erase(values_.cbegin() + buckets_[bi].index);
+         return 1;
       }
 
       // Unordered erase: O(1) amortized. Swaps erased element with last, does NOT preserve insertion order.

@@ -3496,6 +3496,20 @@ suite thread_pool = [] {
 
       expect(numbers.size() == 1000);
    };
+
+   "thread pool zero threads fallback"_test = [] {
+      glz::pool pool(0);
+
+      std::atomic<int> x = 0;
+
+      for (auto i = 0; i < 1000; ++i) {
+         pool.emplace_back([&] { ++x; });
+      }
+
+      pool.wait();
+
+      expect(x == 1000);
+   };
 };
 
 struct local_meta
@@ -7028,6 +7042,20 @@ struct glz::meta<cx_values>
    static constexpr auto value{glz::object("info", &T::info, "index", &T::index, "value", &T::value)};
 };
 
+struct cx_values_implicit_static_key
+{
+   static constexpr std::string_view other_type{"http://www.github.io"};
+   std::string type{"http://www.github.io"};
+   int status{};
+};
+
+template <>
+struct glz::meta<cx_values_implicit_static_key>
+{
+   using T = cx_values_implicit_static_key;
+   static constexpr auto value{glz::object(&T::other_type, &T::type, &T::status)};
+};
+
 struct direct_cx_value_conversion
 {
    static constexpr std::uint64_t const_v{42};
@@ -7123,6 +7151,7 @@ struct variant_to_tuple<std::variant<Ts...>>
 {
    using type = std::tuple<Ts...>;
 };
+
 suite constexpr_values_test = [] {
    "constexpr_values_write"_test = [] {
       cx_values obj{};
@@ -7138,6 +7167,20 @@ suite constexpr_values_test = [] {
       expect(obj.info == "information");
       expect(obj.index == 42);
       expect(obj.value == "special");
+   };
+
+   "constexpr_values_implicit_static_key"_test = [] {
+      cx_values_implicit_static_key obj{};
+      obj.status = 100;
+      std::string s{};
+      expect(not glz::write_json(obj, s));
+      expect(s == R"({"other_type":"http://www.github.io","type":"http://www.github.io","status":100})") << s;
+
+      s = R"({"other_type":"something_else","type":"updated","status":200})";
+      expect(!glz::read_json(obj, s));
+      expect(cx_values_implicit_static_key::other_type == "http://www.github.io");
+      expect(obj.type == "updated");
+      expect(obj.status == 200);
    };
 
    using const_only_variant =
@@ -8152,6 +8195,31 @@ suite self_constraint_real_world = [] {
          expect(minimal == glz::error_code::none);
          expect(!request.discount_code);
       }
+   };
+};
+
+struct skip_read_constraint_opts : glz::opts
+{
+   bool skip_read_constraint = true;
+};
+
+suite skip_read_constraint_tests = [] {
+   "skip_read_constraint allows invalid data through"_test = [] {
+      constexpr skip_read_constraint_opts opts{};
+
+      constrained_object obj{};
+      std::string buffer = R"({"age": 120,"name":"Constantine"})";
+
+      // With default options, constraint is violated
+      auto ec = glz::read_json(obj, buffer);
+      expect(ec == glz::error_code::constraint_violated);
+
+      // With skip_read_constraint = true, constraint is skipped
+      obj = {};
+      ec = glz::read<opts>(obj, buffer);
+      expect(ec == glz::error_code::none);
+      expect(obj.age == 120);
+      expect(obj.name == "Constantine");
    };
 };
 
@@ -12705,14 +12773,14 @@ suite factor8_strings = [] {
       const auto payload = R"("abcdefg")"; // 8 chars after open quote
       const auto parsed = glz::read_json<std::string>(payload);
       expect(parsed.has_value());
-      expect(*parsed->end() == '\0');
+      expect(parsed->data()[parsed->size()] == '\0');
    };
 
    "factor of 8"_test = [] {
       const auto payload = R"("abcdefghijklmno")"; // 16 chars after open quote
       const auto parsed = glz::read_json<std::string>(payload);
       expect(parsed.has_value());
-      expect(*parsed->end() == '\0');
+      expect(parsed->data()[parsed->size()] == '\0');
    };
 };
 
@@ -13060,7 +13128,17 @@ suite member_function_pointer_serialization = [] {
 
       std::string buffer{};
       expect(not glz::write<opts_with_function_pointers{}>(thing, buffer));
-#if defined(__GNUC__) && !defined(__clang__)
+#if GLZ_REFLECTION26
+      // P2996 display_string_of behavior varies by compiler:
+      // - Bloomberg Clang: "(member-function-pointer-type)"
+      // - GCC: full signature like traditional GCC
+      bool pass =
+         (buffer == R"json({"name":"test_item","description":"(member-function-pointer-type)"})json") ||
+         (buffer ==
+          R"({"name":"test_item","description":"std::__cxx11::basic_string<char> (MemberFunctionThing::*)() const"})") ||
+         (buffer == R"({"name":"test_item","description":"std::basic_string<char> (MemberFunctionThing::*)() const"})");
+      expect(pass) << buffer;
+#elif defined(__GNUC__) && !defined(__clang__)
 #if defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI == 0
       // Old ABI uses std::basic_string<char> without __cxx11 namespace
       expect(buffer ==
@@ -13072,6 +13150,10 @@ suite member_function_pointer_serialization = [] {
          R"({"name":"test_item","description":"std::__cxx11::basic_string<char> (MemberFunctionThing::*)() const"})")
          << buffer;
 #endif
+#elif defined(_MSC_VER)
+      // MSVC produces fully qualified type names with calling convention
+      expect(buffer.find("MemberFunctionThing") != std::string::npos && buffer.find("test_item") != std::string::npos)
+         << buffer;
 #else
       expect(buffer == R"({"name":"test_item","description":"std::string (MemberFunctionThing::*)() const"})")
          << buffer;
@@ -13093,7 +13175,19 @@ suite member_function_pointer_serialization = [] {
 
       std::string buffer2{};
       expect(not glz::write<opts_with_function_pointers{}>(s, buffer2));
+#if GLZ_REFLECTION26
+      // P2996 display_string_of behavior varies by compiler:
+      // - Bloomberg Clang: "(member-function-pointer-type)"
+      // - GCC: full signature like traditional output
+      bool pass = (buffer2 == R"json({"f1":"(member-function-pointer-type)"})json") ||
+                  (buffer2 == R"({"f1":"unsigned char (struct_t::*)() const noexcept"})");
+      expect(pass) << buffer2;
+#elif defined(_MSC_VER)
+      // MSVC produces different type names and calling conventions
+      expect(buffer2.find("struct_t") != std::string::npos && buffer2.find("f1") != std::string::npos) << buffer2;
+#else
       expect(buffer2 == R"({"f1":"unsigned char (struct_t::*)() const noexcept"})") << buffer2;
+#endif
    };
 };
 
@@ -13606,6 +13700,27 @@ suite bounded_buffer_overflow_tests = [] {
 
       auto result = glz::write_json(obj, buffer);
       expect(result.ec == glz::error_code::buffer_overflow) << "long string should overflow";
+   };
+
+   // Test: always_null_t (glz::generic null) to bounded buffer (issue #2362)
+   "always_null_t to bounded buffer"_test = [] {
+      glz::generic obj{}; // default constructed generic is null
+      std::array<char, 512> storage{};
+      std::span<char> buffer(storage);
+
+      auto result = glz::write_json(obj, buffer);
+      expect(not result) << "always_null_t write to span should succeed";
+      std::string_view json(buffer.data(), result.count);
+      expect(json == "null") << "should serialize as null";
+   };
+
+   "always_null_t to small bounded buffer"_test = [] {
+      glz::generic obj{}; // default constructed generic is null
+      std::array<char, 2> storage{};
+      std::span<char> buffer(storage);
+
+      auto result = glz::write_json(obj, buffer);
+      expect(result.ec == glz::error_code::buffer_overflow) << "should return buffer_overflow for too-small buffer";
    };
 };
 

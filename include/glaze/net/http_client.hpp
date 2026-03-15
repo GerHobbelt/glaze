@@ -23,6 +23,7 @@
 
 #include "glaze/ext/glaze_asio.hpp"
 #include "glaze/net/http_router.hpp"
+#include "glaze/util/env.hpp"
 #include "glaze/util/key_transformers.hpp"
 
 #ifdef GLZ_ENABLE_SSL
@@ -174,13 +175,17 @@ namespace glz
          return std::nullopt;
       }
 
-      inline std::optional<std::string_view> env_path(const char* name)
+      inline std::optional<std::string> env_path(const char* name) { return getenv_nonempty(name); }
+
+      inline std::optional<std::string_view> to_sv_opt(const std::optional<std::string>& value)
       {
-         if (const char* value = std::getenv(name); value && *value) {
-            return std::string_view{value};
+         if (value && !value->empty()) {
+            return std::string_view{*value};
          }
          return std::nullopt;
       }
+
+      std::optional<std::string_view> to_sv_opt(std::optional<std::string>&&) = delete;
 
       template <typename Loader>
       concept ssl_ca_path_loader = requires(Loader&& loader, std::string_view path) {
@@ -491,8 +496,11 @@ namespace glz
       {
          std::unique_lock<std::shared_mutex> lock(ssl_mtx);
 
+         const auto env_cert_file = detail::env_path("SSL_CERT_FILE");
+         const auto env_cert_dir = detail::env_path("SSL_CERT_DIR");
+
          auto result = detail::configure_ssl_ca_fallback(
-            cert_bundle_file, detail::env_path("SSL_CERT_FILE"), detail::env_path("SSL_CERT_DIR"),
+            cert_bundle_file, detail::to_sv_opt(env_cert_file), detail::to_sv_opt(env_cert_dir),
             [&](std::string_view path) -> std::error_code {
                asio::error_code ec;
                ssl_context->load_verify_file(std::string(path), ec);
@@ -581,21 +589,38 @@ namespace glz
 
       ~http_stream_connection() { disconnect(); }
    };
-
-   // Stream request parameters struct
+   // deprecated, use stream_request_params_v2 instead
    struct stream_request_params
    {
       std::string url;
       http_data_handler on_data;
       http_error_handler on_error;
-      std::string method{};
+      std::string method{"GET"};
       std::string body{};
       std::unordered_map<std::string, std::string> headers{};
       http_connect_handler on_connect{};
       http_disconnect_handler on_disconnect{};
       std::chrono::seconds timeout{std::chrono::seconds{30}};
       stream_read_strategy strategy{stream_read_strategy::bulk_transfer};
-      std::function<bool(int)> status_is_error{}; // Custom predicate to decide whether a status code should fail
+      std::function<bool(int)> status_is_error{[](int status) { return status >= 400; }};
+      size_t max_buffer_size{1024 * 1024};
+   };
+
+   // Stream request parameters struct
+   struct stream_request_params_v2
+   {
+      std::string method{"GET"};
+      std::string url;
+      std::chrono::seconds timeout{std::chrono::seconds{30}};
+      stream_read_strategy strategy{stream_read_strategy::bulk_transfer};
+      size_t max_buffer_size{1024 * 1024};
+      std::string body;
+      std::unordered_map<std::string, std::string> headers;
+      http_connect_handler on_connect;
+      http_disconnect_handler on_disconnect;
+      http_data_handler on_data;
+      http_error_handler on_error;
+      std::function<bool(int)> status_is_error{[](int status) { return status >= 400; }};
    };
 
    struct http_client
@@ -767,7 +792,7 @@ namespace glz
          return put(url, json_str, merged_headers);
       }
 
-      // New unified streaming request method
+      [[deprecated("use stream_request_v2 instead")]]
       std::shared_ptr<http_stream_connection> stream_request(const stream_request_params& params)
       {
          auto url_result = parse_url(params.url);
@@ -776,11 +801,22 @@ namespace glz
             return nullptr;
          }
 
-         std::string method = params.method.empty() ? "GET" : params.method;
+         return perform_stream_request(params.method, *url_result, params.body, params.max_buffer_size, params.headers,
+                                       params.timeout, params.strategy, params.status_is_error, params.on_data,
+                                       params.on_error, params.on_connect, params.on_disconnect);
+      }
 
-         return perform_stream_request(method, *url_result, params.body, params.headers, params.timeout,
-                                       params.strategy, params.status_is_error, params.on_data, params.on_error,
-                                       params.on_connect, params.on_disconnect);
+      std::shared_ptr<http_stream_connection> stream_request_v2(const stream_request_params_v2& params)
+      {
+         auto url_result = parse_url(params.url);
+         if (!url_result) {
+            asio::post(io_executor, [on_error = params.on_error, error = url_result.error()]() { on_error(error); });
+            return nullptr;
+         }
+
+         return perform_stream_request(params.method, *url_result, params.body, params.max_buffer_size, params.headers,
+                                       params.timeout, params.strategy, params.status_is_error, params.on_data,
+                                       params.on_error, params.on_connect, params.on_disconnect);
       }
 
       // Asynchronous GET request
@@ -931,7 +967,7 @@ namespace glz
       }
 
       std::shared_ptr<http_stream_connection> perform_stream_request(
-         const std::string& method, const url_parts& url, const std::string& body,
+         const std::string& method, const url_parts& url, const std::string& body, size_t max_buffer_size,
          const std::unordered_map<std::string, std::string>& headers, std::chrono::seconds timeout,
          stream_read_strategy strategy, std::function<bool(int)> status_is_error, http_data_handler on_data,
          http_error_handler on_error, http_connect_handler on_connect, http_disconnect_handler on_disconnect)
@@ -946,16 +982,13 @@ namespace glz
          }
 #endif
 
-         auto connection = std::make_shared<http_stream_connection>(1024 * 1024, strategy);
+         auto connection = std::make_shared<http_stream_connection>(max_buffer_size, strategy);
          connection->socket =
             std::make_shared<socket_variant>(connection_pool->get_connection(url.host, url.port, use_https));
          connection->timer = std::make_shared<asio::steady_timer>(io_executor);
          connection->is_https = use_https;
 
          connection->status_is_error = std::move(status_is_error);
-         if (!connection->status_is_error) {
-            connection->status_is_error = [](int status) { return status >= 400; };
-         }
 
          // Wrap the disconnect handler to return the socket to the pool
          auto internal_on_disconnect = [this, user_on_disconnect = std::move(on_disconnect), connection, url,
