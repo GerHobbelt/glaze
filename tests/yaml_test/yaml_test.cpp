@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "glaze/json/generic.hpp"
+#include "minimal_buffer.hpp"
 #include "scratch_directory.hpp"
 #include "ut/ut.hpp"
 
@@ -7298,6 +7299,231 @@ suite generic_colon_in_value_tests = [] {
    };
 };
 
+// Test for issue #2826: quotes in plain scalars must not affect later quoted values
+suite plain_scalar_quotes_preserve_later_quotes = [] {
+   "plain quotes do not affect later mapping values"_test = [] {
+      struct test_case
+      {
+         std::string_view yaml;
+         std::string_view one;
+      };
+
+      const test_case cases[] = {
+         {"one: a'b\ntwo: 'c: d'\n", "a'b"},
+         {"one: a'b\r\ntwo: 'c: d'\r\n", "a'b"},
+         {"one: a'b\rtwo: 'c: d'\r", "a'b"},
+         {"one: a'b\ntwo: 'c: d'", "a'b"},
+         {"one: a\"b\ntwo: \"c: d\"\n", "a\"b"},
+         {"one: a 'b\ntwo: 'c: d'\n", "a 'b"},
+         {"one: a \"b\ntwo: \"c: d\"\n", "a \"b"},
+         {"one: a\"b\\\ntwo: \"c: d\"\n", "a\"b\\"},
+         {"one: a\"b\\\r\ntwo: \"c: d\"\r\n", "a\"b\\"},
+         {"one: a'b\n# comment ' with: a colon\ntwo: 'c: d'\n", "a'b"},
+         {"one: 'a''b'\ntwo: 'c: d'\n", "a'b"},
+         {"one: a'b\ntwo: \"c: d\"\n", "a'b"},
+         {"two: 'c: d'\none: a'b\n", "a'b"},
+         {"one: \"a\\\"b: c\"\ntwo: 'c: d'\n", "a\"b: c"},
+         {"one: \"a\\\"\"\ntwo: 'c: d'\n", "a\""},
+         {"one: \"a\\\\\"\ntwo: 'c: d'\n", "a\\"},
+      };
+
+      const auto check = [&]<class T>() {
+         for (const auto& [yaml, one] : cases) {
+            T parsed{};
+            const auto ec = glz::read_yaml(parsed, yaml);
+            expect(!ec) << glz::format_error(ec, yaml);
+            if (ec) continue;
+
+            expect(parsed.size() == 2u) << yaml;
+            expect(glz::write_json(parsed["one"]).value_or("WRITE_ERROR") == glz::write_json(one).value()) << yaml;
+            expect(glz::write_json(parsed["two"]).value_or("WRITE_ERROR") == R"("c: d")") << yaml;
+         }
+      };
+
+      check.template operator()<glz::generic>();
+      check.template operator()<glz::generic_u64>();
+      check.template operator()<glz::generic_i64>();
+      check.template operator()<std::map<std::string, std::string>>();
+   };
+
+   "plain quotes do not allow inconsistent sibling indentation"_test = [] {
+      const std::string_view yaml = "one: a'b\n two: 'c: d'\n";
+      glz::generic_u64 parsed{};
+      const auto ec = glz::read_yaml(parsed, yaml);
+      expect(ec == glz::error_code::syntax_error);
+   };
+
+   "multiline implicit block keys are rejected"_test = [] {
+      for (const std::string_view yaml : {"key: \"line1\n  line2\": value\n", "key: 'line1\n  line2': value\n",
+                                          "\"line1\n  line2\": value\n", "'line1\n  line2': value\n"}) {
+         glz::generic parsed{};
+         std::map<std::string, std::string> typed{};
+         expect(bool(glz::read_yaml(parsed, yaml))) << yaml;
+         expect(bool(glz::read_yaml(typed, yaml))) << yaml;
+      }
+   };
+
+   "multiline explicit block and flow keys remain supported"_test = [] {
+      for (const std::string_view yaml :
+           {"key:\n  ? \"line1\n    line2\"\n  : value\n", "key:\n  ? 'line1\n    line2'\n  : value\n",
+            "key: {? \"line1\n    line2\": value}\n", "key: {? 'line1\n    line2': value}\n",
+            "key: {\"line1\n    line2\": value}\n"}) {
+         glz::generic parsed{};
+         std::map<std::string, std::map<std::string, std::string>> typed{};
+         const auto ec = glz::read_yaml(parsed, yaml);
+         const auto typed_ec = glz::read_yaml(typed, yaml);
+         expect(!ec) << glz::format_error(ec, yaml);
+         expect(!typed_ec) << glz::format_error(typed_ec, yaml);
+         expect(glz::write_json(parsed).value_or("WRITE_ERROR") == R"({"key":{"line1 line2":"value"}})");
+         expect(glz::write_json(typed).value_or("WRITE_ERROR") == R"({"key":{"line1 line2":"value"}})");
+      }
+   };
+
+   "quote lookahead preserves nested collections and multiline strings"_test = [] {
+      for (const std::string_view yaml :
+           {"outer:\n  one: a'b\n  two: 'c: d'\n", "outer: {\"one\":\"a'b\",\"two\":\"c: d\"}\n",
+            "outer: {\"one\":\"} : payload\",\"two\":\"c: d\"}\n", "outer:\n  one: 'a\n    b'\n  two: 'c: d'\n",
+            "outer:\n  one: \"a\\\n    b\"\n  two: 'c: d'\n"}) {
+         glz::generic parsed{};
+         std::map<std::string, std::map<std::string, std::string>> typed{};
+         const auto ec = glz::read_yaml(parsed, yaml);
+         const auto typed_ec = glz::read_yaml(typed, yaml);
+         expect(!ec) << glz::format_error(ec, yaml);
+         expect(!typed_ec) << glz::format_error(typed_ec, yaml);
+         if (ec || typed_ec) continue;
+
+         expect(glz::write_json(parsed).value_or("GENERIC_WRITE_ERROR") ==
+                glz::write_json(typed).value_or("TYPED_WRITE_ERROR"))
+            << yaml;
+         expect(parsed["outer"]["two"].as<std::string>() == "c: d");
+      }
+   };
+};
+
+// Test for issue #2889: the '' escape in a single-quoted scalar must not fool the implicit-key
+// probes into reading a ':' that is scalar content as a mapping separator.
+suite single_quoted_escape_probe_tests = [] {
+   "'' escape hides a colon from every implicit-key probe"_test = [] {
+      struct test_case
+      {
+         std::string_view yaml;
+         std::string_view json;
+      };
+
+      const test_case cases[] = {
+         // Block mapping value, block mapping key, and a bare document scalar.
+         {"one: 'it''s: here'\n", R"({"one":"it's: here"})"},
+         {"'it''s: here': v\n", R"({"it's: here":"v"})"},
+         {"'it''s: here'\n", R"("it's: here")"},
+         // Block sequence entry.
+         {"- 'a''b: c'\n", R"(["a'b: c"])"},
+         // Flow sequence, alone and beside a sibling.
+         {"[ 'a''b: c' ]\n", R"(["a'b: c"])"},
+         {"[ 'a''b: c', d ]\n", R"(["a'b: c","d"])"},
+         {"one: [ 'x''y: z' ]\n", R"({"one":["x'y: z"]})"},
+         // Flow mapping key.
+         {"{ 'a''b: c': v }\n", R"({"a'b: c":"v"})"},
+         {"one: { 'x''y: z': w }\n", R"({"one":{"x'y: z":"w"}})"},
+         // A trailing '' pair, so the scalar ends on an escape.
+         {"one: 'a: b'''\n", R"({"one":"a: b'"})"},
+         // The double-quoted counterpart, whose escape the probes already handled.
+         {"one: \"a\\\": b\"\n", R"({"one":"a\": b"})"},
+      };
+
+      for (const auto& [yaml, json] : cases) {
+         glz::generic parsed{};
+         const auto ec = glz::read_yaml(parsed, yaml);
+         expect(!ec) << glz::format_error(ec, yaml);
+         if (ec) continue;
+         expect(glz::write_json(parsed).value_or("WRITE_ERROR") == json) << yaml;
+      }
+   };
+
+   "the generic and typed readers agree on the '' escape"_test = [] {
+      const std::string_view yaml = "one: 'it''s: here'\n";
+
+      glz::generic parsed{};
+      std::map<std::string, std::string> typed{};
+      const auto ec = glz::read_yaml(parsed, yaml);
+      const auto typed_ec = glz::read_yaml(typed, yaml);
+      expect(!ec) << glz::format_error(ec, yaml);
+      expect(!typed_ec) << glz::format_error(typed_ec, yaml);
+      if (ec || typed_ec) return;
+      expect(glz::write_json(parsed).value_or("GENERIC_WRITE_ERROR") ==
+             glz::write_json(typed).value_or("TYPED_WRITE_ERROR"));
+   };
+
+   // A quote is an indicator only where a node can begin. Once a plain scalar is under way it runs
+   // to the end of the line, so the spaces and quotes inside it are content and a probe must not
+   // read one as opening a quoted scalar -- least of all as opening one whose '' it then escapes.
+   "quotes inside a plain scalar stay content"_test = [] {
+      struct test_case
+      {
+         std::string_view yaml;
+         std::string_view json;
+      };
+
+      const test_case cases[] = {
+         {"one: a 'b'\n", R"({"one":"a 'b'"})"},
+         {"one: a '''\n", R"({"one":"a '''"})"},
+         {"one: a \"b\"\n", R"({"one":"a \"b\""})"},
+         // The plain key ends at the ": " the quote never protected.
+         {"a 'b: c'\n", R"({"a 'b":"c'"})"},
+         {"a ''': x\n", R"({"a '''":"x"})"},
+         // ',' opens no node outside a flow collection: ns-plain-safe-out admits it as content.
+         {"a,'b: c\n", R"({"a,'b":"c"})"},
+      };
+
+      for (const auto& [yaml, json] : cases) {
+         glz::generic parsed{};
+         const auto ec = glz::read_yaml(parsed, yaml);
+         expect(!ec) << glz::format_error(ec, yaml);
+         if (ec) continue;
+         expect(glz::write_json(parsed).value_or("WRITE_ERROR") == json) << yaml;
+      }
+   };
+
+   // A node begins at the start of the scan, after the indicators that end the node before it, and
+   // after the properties that precede one. Anywhere else -- inside a plain scalar already under
+   // way, or after a closing bracket -- a quote is content, and a probe that opens a scalar there
+   // runs off the end of the line and loses the separator that follows.
+   "brackets and node properties do not move the node start"_test = [] {
+      struct test_case
+      {
+         std::string_view yaml;
+         std::string_view json;
+      };
+
+      const test_case cases[] = {
+         // In block context ns-plain-safe-out admits brackets, so these are plain keys, not flow
+         // collections, and the apostrophes in them are content.
+         {"list[0]'s value: x\n", R"({"list[0]'s value":"x"})"},
+         {"a[b]'c: d\n", R"({"a[b]'c":"d"})"},
+         {"a{b}'c: d\n", R"({"a{b}'c":"d"})"},
+         {"a['][]: v\n", R"({"a['][]":"v"})"},
+         {"- a[b]'c: d\n", R"([{"a[b]'c":"d"}])"},
+         // An anchor or a tag precedes the node, so the scalar after one is still at a node start.
+         {"[ &an 'c]d': v ]\n", R"([{"c]d":"v"}])"},
+         {"[ !!str 'c]d': v ]\n", R"([{"c]d":"v"}])"},
+         {"[ a, &an 'c]d': v ]\n", R"(["a",{"c]d":"v"}])"},
+         // ',' separates flow entries, so a node begins after one.
+         {"[a, 'c]d': e]\n", R"(["a",{"c]d":"e"}])"},
+         // Both halves together: a property in front of a scalar carrying the '' escape.
+         {"one: &an 'it''s: here'\n", R"({"one":"it's: here"})"},
+         {"[ &an 'it''s: here' ]\n", R"(["it's: here"])"},
+         {"k: !!str 'it''s: here'\n", R"({"k":"it's: here"})"},
+      };
+
+      for (const auto& [yaml, json] : cases) {
+         glz::generic parsed{};
+         const auto ec = glz::read_yaml(parsed, yaml);
+         expect(!ec) << glz::format_error(ec, yaml);
+         if (ec) continue;
+         expect(glz::write_json(parsed).value_or("WRITE_ERROR") == json) << yaml;
+      }
+   };
+};
+
 suite generic_malformed_flow_tests = [] {
    "generic_malformed_flow_array_in_value"_test = [] {
       // Unclosed flow array in a block mapping value should produce an error
@@ -12764,6 +12990,33 @@ suite yaml_indent_width_tests = [] {
       std::string buffer{};
       expect(!glz::write<opts>(seq_doc_t{}, buffer));
       expect(buffer == "{items: [{a: 1, b: 2}, {a: 3, b: 4}]}") << buffer;
+   };
+};
+
+// Regression coverage for GitHub issue #2854: read_yaml has its own emptiness check, separate from
+// the shared one in core/read.hpp.
+suite contiguous_buffer_without_empty = [] {
+   "read_yaml round trip"_test = [] {
+      test_buffers::qt_style_buffer buffer{};
+      expect(not glz::write_yaml(std::map<std::string, int>{{"a", 1}}, buffer));
+
+      std::map<std::string, int> value{};
+      expect(not glz::read_yaml(value, buffer));
+      expect(value == std::map<std::string, int>{{"a", 1}});
+   };
+
+   "read_yaml on an empty buffer"_test = [] {
+      test_buffers::qt_style_buffer buffer{};
+      std::optional<int> value{42};
+      expect(not glz::read_yaml(value, buffer));
+      expect(not value.has_value());
+   };
+
+   "read through a buffer that is only contiguous"_test = [] {
+      const test_buffers::read_only_buffer buffer{"a: 2"};
+      std::map<std::string, int> value{};
+      expect(not glz::read_yaml(value, buffer));
+      expect(value == std::map<std::string, int>{{"a", 2}});
    };
 };
 
