@@ -42,8 +42,64 @@ int main() {
 
 ## HTTPS Trust Store Configuration
 
-When using HTTPS, certificate verification depends on your OpenSSL trust store configuration.
-To simplify setup, `http_client` provides:
+A new `http_client` starts with certificate verification on (`verify_peer`) and is seeded with the platform's trust anchors: OpenSSL's default verify paths everywhere, plus the Windows `ROOT` certificate store on Windows. In most deployments HTTPS works with no configuration at all.
+
+### Adding your own CA certificates
+
+When you need to trust something the platform does not (a private CA, a self-signed development server, or a CA bundle you ship with your application), add it. All three are additive, so the platform anchors loaded at construction are kept:
+
+```cpp
+glz::http_client client;
+
+// From a PEM bundle file on disk
+if (auto result = client.add_ca_certificate_file("cacert.pem"); !result) {
+    std::cerr << "Failed to add CA: " << result.error().message() << '\n';
+}
+
+// From an in-memory PEM bundle, e.g. one embedded in the binary.
+// Accepts any number of concatenated PEM certificates.
+client.add_ca_certificates_pem(embedded_cacert_pem);
+
+// From an OpenSSL hashed directory (must be indexed with `openssl rehash`)
+client.add_ca_certificate_directory("/etc/ssl/certs");
+```
+
+`add_ca_certificate_file`, `add_ca_certificates_pem` and `add_os_ca_certificates` are safe to call at any time, including while other threads are issuing requests. `add_ca_certificate_directory` is not: OpenSSL appends to its lookup list without a lock and reads that list unlocked during verification, so call it before the first request.
+
+Prefer these over `set_ssl_verify_mode(asio::ssl::verify_none)`. Disabling verification turns off certificate checking entirely and leaves the connection open to man-in-the-middle attacks; adding an anchor keeps verification intact and simply teaches the client what to trust.
+
+One asymmetry to be aware of: `add_ca_certificate_file` validates the path immediately and reports a missing or malformed bundle, while `add_ca_certificate_directory` cannot. OpenSSL registers directories for lazy lookup during the handshake, so a bad directory path returns success here and surfaces later as a verification failure.
+
+### Troubleshooting `certificate verify failed`
+
+A handshake failing with `certificate verify failed` against an ordinary public endpoint almost always means the trust store is empty rather than that the server is untrustworthy. The `std::error_code` value is `167772294` (`0x0A000086`), which unpacks into OpenSSL library `20` (`ERR_LIB_SSL`) and reason `134` (`SSL_R_CERTIFICATE_VERIFY_FAILED`).
+
+This is most common with OpenSSL from a package manager such as vcpkg or Conan. Those builds bake in an `OPENSSLDIR` pointing at the machine that built them, and ship no CA bundle, so `set_default_verify_paths()` reports success while resolving to a directory that does not exist on your machine. On Windows this used to leave the client with no anchors at all, because OpenSSL never consults the operating system's certificate store on its own.
+
+Glaze loads the Windows `ROOT` store directly (via `crypt32`) when the client is constructed, which covers this case for most machines. Two limits are worth knowing:
+
+- **The `ROOT` store is a cache, not the full Microsoft root program.** Windows ships a seed set and fetches the remaining roots on demand when SChannel needs them. Glaze reads whatever is cached at construction, and OpenSSL cannot trigger the on-demand fetch, so a fresh, offline, or tightly locked-down machine may still be missing an anchor for some public endpoints.
+- **The load happens once.** Roots installed afterwards (by Windows Update or an administrator) are not picked up by an already-constructed client.
+
+If either bites, supply the bundle explicitly with `add_ca_certificate_file` or `add_ca_certificates_pem`, which is also the more reproducible choice for deployed software.
+
+Related controls:
+
+- `add_os_ca_certificates()` re-loads the OS anchors, returning how many were added. It returns `0` on platforms where OpenSSL's default verify paths already are the system store (Linux, macOS, the BSDs).
+- Define `GLZ_DISABLE_WINDOWS_CERT_STORE` to compile the Windows path out, for example when you want trust pinned to a bundle you supply. The `crypt32` system library remains on the link line, since a consumer-defined macro is not visible to Glaze's CMake.
+
+Roots that Windows restricts to non-TLS purposes are skipped, so a root trusted only for, say, code signing does not become a TLS anchor.
+
+On other platforms, point the client at a bundle explicitly:
+
+```cpp
+glz::http_client client;
+client.add_ca_certificate_file("cacert.pem");  // e.g. from https://curl.se/docs/caextract.html
+```
+
+### Environment-driven configuration
+
+`configure_system_ca_certificates` resolves a bundle through a fallback chain, which is useful when the location differs per deployment:
 
 ```cpp
 std::expected<void, std::error_code> configure_system_ca_certificates(
@@ -58,18 +114,18 @@ Fallback order:
 3. `SSL_CERT_DIR` environment variable
 4. OpenSSL default verify paths (`set_default_verify_paths`)
 
-Example:
-
 ```cpp
 glz::http_client client;
 
-if (auto ec = client.configure_system_ca_certificates("/path/to/cert.pem"); !ec) {
-    std::cerr << "Failed to configure CA trust roots: " << ec.error().message() << '\n';
+if (auto result = client.configure_system_ca_certificates("/path/to/cert.pem"); !result) {
+    std::cerr << "Failed to configure CA trust roots: " << result.error().message() << '\n';
     return;
 }
 
 auto response = client.get("https://example.com");
 ```
+
+Note that step 4 succeeds whether or not those paths contain anything, since OpenSSL only registers them for later lookup. If you need certainty that real anchors are loaded, use `add_ca_certificate_file` with a bundle you control.
 
 Notes:
 
@@ -97,6 +153,26 @@ std::expected<response, std::error_code> post(
 );
 ```
 
+### PUT Request
+
+```cpp
+std::expected<response, std::error_code> put(
+    std::string_view url, 
+    const std::string& body,
+    const glz::http_headers& headers = {}
+);
+```
+
+### PATCH Request
+
+```cpp
+std::expected<response, std::error_code> patch(
+    std::string_view url, 
+    const std::string& body,
+    const glz::http_headers& headers = {}
+);
+```
+
 ### JSON POST Request
 ```cpp
 template<class T>
@@ -106,6 +182,28 @@ std::expected<response, std::error_code> post_json(
     const glz::http_headers& headers = {}
 );
 ```
+
+### JSON PUT Request
+```cpp
+template<class T>
+std::expected<response, std::error_code> put_json(
+    std::string_view url, 
+    const T& data,
+    const glz::http_headers& headers = {}
+);
+```
+
+
+### JSON PATCH Request
+```cpp
+template<class T>
+std::expected<response, std::error_code> patch_json(
+    std::string_view url, 
+    const T& data,
+    const glz::http_headers& headers = {}
+);
+```
+
 
 ## Asynchronous Methods
 
@@ -198,10 +296,10 @@ struct stream_request_params_v2 {
     size_t max_buffer_size{1024 * 1024};
     std::string body;
     glz::http_headers headers;
-    http_connect_handler on_connect;
-    http_disconnect_handler on_disconnect;
     http_data_handler on_data;
     http_error_handler on_error;
+    http_connect_handler on_connect;
+    http_disconnect_handler on_disconnect;
     std::function<bool(int)> status_is_error{[](int status){ return status >= 400; }};
 };
 ```
@@ -213,10 +311,10 @@ struct stream_request_params_v2 {
 -   `max_buffer_size`: Larger buffer can decrease dropouts and increase throughput at cost of memory usage. (default is 1 MiB)
 -   `body`: The HTTP Body to send.
 -   `headers`: The HTTP headers to send.
--   `on_connect`: A callback that's called when the connection is established and the headers are received.
--   `on_disconnect`: A callback that's called when the connection is closed.
 -   `on_data`: A callback that's called when data is received.
 -   `on_error`: A callback that's called when an error occurs.
+-   `on_connect`: A callback that's called when the connection is established and the headers are received.
+-   `on_disconnect`: A callback that's called when the connection is closed.
 -   `status_is_error`: Optional predicate to decide whether a status code should trigger `on_error` (defaults to checking for codes ≥ 400).
 
 To override the default behaviour you can supply a predicate:

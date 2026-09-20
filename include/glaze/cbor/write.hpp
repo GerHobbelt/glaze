@@ -46,7 +46,7 @@ namespace glz
       GLZ_ALWAYS_INLINE void dump_byte(uint8_t byte, B& b, IX& ix)
       {
          if (ix >= b.size()) [[unlikely]] {
-            b.resize(b.size() == 0 ? 128 : b.size() * 2);
+            grow_buffer(b, b.size() == 0 ? 64 : ix + 1);
          }
          b[ix] = static_cast<typename std::decay_t<B>::value_type>(byte);
          ++ix;
@@ -75,7 +75,7 @@ namespace glz
       {
          constexpr auto n = sizeof(T);
          if (const auto k = ix + n; k > b.size()) [[unlikely]] {
-            b.resize(2 * k);
+            grow_buffer(b, k);
          }
 
          if constexpr (std::endian::native == std::endian::little && n > 1) {
@@ -952,32 +952,9 @@ namespace glz
       }
    };
 
-   // Enums with glaze reflection
-   template <glaze_enum_t T>
-   struct to<CBOR, T> final
-   {
-      template <auto Opts>
-      GLZ_ALWAYS_INLINE static void op(auto&& value, is_context auto&& ctx, auto&& b, auto& ix)
-      {
-         using V = std::underlying_type_t<std::decay_t<T>>;
-         if constexpr (std::is_signed_v<V>) {
-            const auto v = static_cast<V>(value);
-            if (v >= 0) {
-               cbor_detail::encode_arg(ctx, cbor::major::uint, static_cast<uint64_t>(v), b, ix);
-            }
-            else {
-               cbor_detail::encode_arg(ctx, cbor::major::nint, static_cast<uint64_t>(~v), b, ix);
-            }
-         }
-         else {
-            cbor_detail::encode_arg(ctx, cbor::major::uint, static_cast<uint64_t>(value), b, ix);
-         }
-      }
-   };
-
-   // Plain enums (non-glaze)
+   // Enums, reflected or plain: both are written as the ordinal, so one writer covers them
    template <class T>
-      requires(std::is_enum_v<T> && !glaze_enum_t<T>)
+      requires(std::is_enum_v<T>)
    struct to<CBOR, T> final
    {
       template <auto Opts>

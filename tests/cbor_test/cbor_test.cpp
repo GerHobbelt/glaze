@@ -310,6 +310,9 @@ struct signal_t
 // Enum with underlying type
 enum class sub : uint8_t { START, END, UPDATE_ITEM, UPDATE_PRICE };
 
+// bool is a legal fixed underlying type
+enum class bool_enum : bool { off, on };
+
 struct enum_struct
 {
    sub b;
@@ -497,6 +500,35 @@ void integer_tests()
       int64_t result{};
       expect(not glz::read_cbor(result, buffer));
       expect(result == v);
+   };
+
+   "uint8_out_of_range"_test = [] {
+      // 300 (0x19 0x01 0x2C) does not fit in a uint8_t; the reader must reject it rather
+      // than truncate to 44, matching the signed reader and the JSON/MessagePack readers.
+      const std::string buffer = {char(0x19), char(0x01), char(0x2C)};
+      uint8_t result = 7;
+      expect(bool(glz::read_cbor(result, buffer)));
+   };
+
+   "uint16_out_of_range"_test = [] {
+      const std::string buffer = {char(0x1A), char(0x00), char(0x01), char(0x00), char(0x00)}; // 65536
+      uint16_t result = 7;
+      expect(bool(glz::read_cbor(result, buffer)));
+   };
+
+   "uint8_max_in_range"_test = [] {
+      const std::string buffer = {char(0x18), char(0xFF)}; // 255
+      uint8_t result{};
+      expect(not glz::read_cbor(result, buffer));
+      expect(result == 255u);
+   };
+
+   "uint64_max_in_range"_test = [] {
+      const std::string buffer = {char(0x1B), char(0xFF), char(0xFF), char(0xFF), char(0xFF),
+                                  char(0xFF), char(0xFF), char(0xFF), char(0xFF)};
+      uint64_t result{};
+      expect(not glz::read_cbor(result, buffer));
+      expect(result == (std::numeric_limits<uint64_t>::max)());
    };
 }
 
@@ -1001,6 +1033,40 @@ void enum_tests()
       obj = {};
       expect(not glz::read_cbor(obj, buffer));
       expect(obj.b == sub::END);
+   };
+
+   "enum_out_of_range"_test = [] {
+      // sub has a uint8_t underlying type; 300 does not fit and must be rejected rather than
+      // truncated into the enum, the way the JSON and MessagePack enum readers reject it.
+      const std::string buffer = {char(0x19), char(0x01), char(0x2C)}; // 300
+      sub result = sub::START;
+      expect(bool(glz::read_cbor(result, buffer)));
+   };
+
+   "enum_negative_into_unsigned"_test = [] {
+      // A negative ordinal (0x20 = -1) cannot be represented by a uint8_t-backed enum.
+      const std::string buffer = {char(0x20)};
+      sub result = sub::START;
+      expect(bool(glz::read_cbor(result, buffer)));
+   };
+
+   "bool_underlying_enum"_test = [] {
+      // The writer emits a bool-backed enum as a CBOR integer, so the reader must not route it
+      // through the boolean reader, which only accepts the simple true/false values.
+      std::string buffer{};
+      expect(not glz::write_cbor(bool_enum::on, buffer));
+
+      bool_enum result{};
+      expect(not glz::read_cbor(result, buffer));
+      expect(result == bool_enum::on);
+   };
+
+   "bool_underlying_enum_out_of_range"_test = [] {
+      // The ordinal is read through the uint8_t reader, whose bound is wider than bool's domain,
+      // so 2 has to be rejected here rather than cast into a bool-backed enum.
+      const std::string buffer = {char(0x02)};
+      bool_enum result{};
+      expect(bool(glz::read_cbor(result, buffer)));
    };
 }
 
@@ -2308,6 +2374,11 @@ void typed_array_tests()
 }
 
 // CBOR-to-JSON conversion tests
+struct cbor_escape_opts : glz::opts
+{
+   bool escape_control_characters = true;
+};
+
 void cbor_to_json_tests()
 {
    "cbor_to_json_integer"_test = [] {
@@ -2343,6 +2414,53 @@ void cbor_to_json_tests()
       std::string json;
       expect(not glz::cbor_to_json(cbor_buffer, json));
       expect(json == "\"hello\"");
+   };
+
+   "cbor_to_json_rejects_control_characters_by_default"_test = [] {
+      // A control byte is legal in a CBOR text string but cannot be written as JSON without
+      // \uXXXX, so the default refuses it rather than emitting output that will not re-parse.
+      std::map<std::string, std::string> v{{std::string("k\001"), std::string("a\001b")}};
+      std::string cbor_buffer;
+      expect(not glz::write_cbor(v, cbor_buffer));
+
+      std::string json;
+      expect(glz::cbor_to_json(cbor_buffer, json).ec == glz::error_code::invalid_control_character);
+   };
+
+   "cbor_to_json_escapes_control_characters_when_asked"_test = [] {
+      // escape_control_characters opts into carrying them across. Covers a value and a map key.
+      std::map<std::string, std::string> v{{std::string("k\001"), std::string("a\001b")}};
+      std::string cbor_buffer;
+      expect(not glz::write_cbor(v, cbor_buffer));
+
+      std::string json;
+      expect(not glz::cbor_to_json<cbor_escape_opts{}>(cbor_buffer, json));
+      expect(json == "{\"k\\u0001\":\"a\\u0001b\"}") << json;
+      std::map<std::string, std::string> round_trip{};
+      expect(not glz::read_json(round_trip, json)) << json;
+      expect(round_trip == v);
+   };
+
+   "cbor_to_json_passes_through_short_escape_control_characters"_test = [] {
+      // The default refuses only control characters with no two-character JSON escape. Backspace,
+      // tab, newline, form feed and carriage return have one, so they keep converting normally.
+      // The reject sits in the else of the escape table lookup and cannot see them. The long
+      // value puts the run past the scalar tail and into the writer's block scan, which rejects
+      // at a separate site.
+      const std::string shorts = "\b\t\n\f\r";
+      std::map<std::string, std::string> v{{"k" + shorts, shorts},
+                                           {"long", std::string(64, 'a') + shorts + std::string(64, 'b')}};
+      std::string cbor_buffer;
+      expect(not glz::write_cbor(v, cbor_buffer));
+
+      std::string json;
+      expect(not glz::cbor_to_json(cbor_buffer, json)) << json;
+      expect(json.find("\\b\\t\\n\\f\\r") != std::string::npos) << json;
+      expect(json.find_first_of(shorts) == std::string::npos) << json;
+
+      std::map<std::string, std::string> round_trip{};
+      expect(not glz::read_json(round_trip, json)) << json;
+      expect(round_trip == v);
    };
 
    "cbor_to_json_array"_test = [] {
@@ -2463,6 +2581,110 @@ void cbor_to_json_tests()
       std::string json;
       expect(not glz::cbor_to_json(cbor_buffer, json));
       expect(json == "[100,200,300]");
+   };
+
+   // Prettified output breaks the line before '}' only when the map holds pairs. The emptiness of
+   // a map is not decided by its additional info: an indefinite map ends at the break code, and a
+   // definite one may carry a zero count in a following byte.
+   "cbor_to_json_prettify_empty_map"_test = [] {
+      constexpr glz::opts pretty{.prettify = true};
+
+      const std::array<uint8_t, 1> definite{0xa0}; // map(0)
+      expect(glz::cbor_to_json<pretty>(definite).value() == "{}");
+
+      const std::array<uint8_t, 2> indefinite{0xbf, 0xff}; // map(*) with an immediate break
+      expect(glz::cbor_to_json<pretty>(indefinite).value() == "{}");
+
+      const std::array<uint8_t, 2> definite_wide{0xb8, 0x00}; // map(0) with a 1-byte count
+      expect(glz::cbor_to_json<pretty>(definite_wide).value() == "{}");
+   };
+
+   // A CBOR document is one data item. Neither an empty buffer nor a CBOR sequence (RFC 8742) is
+   // one, and converting either used to report success while producing text no JSON parser accepts.
+   "cbor_to_json_requires_exactly_one_item"_test = [] {
+      std::string json;
+      expect(glz::cbor_to_json(std::string_view{}, json).ec == glz::error_code::unexpected_end);
+
+      const std::array<uint8_t, 2> two_items{0x01, 0x02};
+      expect(glz::cbor_to_json(two_items, json).ec == glz::error_code::syntax_error);
+
+      // Trailing bytes after a complete item are trailing bytes even when they are not a full item
+      const std::array<uint8_t, 2> trailing{0x01, 0x19};
+      expect(glz::cbor_to_json(trailing, json).ec == glz::error_code::syntax_error);
+   };
+
+   // dump() does not bounds check a buffer it cannot grow, so the converter reserves every write.
+   "cbor_to_json_fixed_buffer"_test = [] {
+      const std::array<uint8_t, 4> input{0x83, 0x01, 0x02, 0x03}; // [1,2,3]
+
+      std::array<char, 64> room{};
+      const auto ec = glz::cbor_to_json(input, room);
+      expect(not ec);
+      // count carries the written length, which a fixed-size buffer has no other way to learn
+      expect(std::string_view{room.data(), ec.count} == "[1,2,3]");
+
+      // Nested arrays write nothing but structural characters, the writes that used to go
+      // unchecked, so they overflow a small buffer without ever reaching a value writer.
+      const std::array<uint8_t, 3> nested{0x81, 0x81, 0x80}; // [[[]]]
+      std::array<char, 2> cramped{};
+      expect(glz::cbor_to_json(nested, cramped).ec == glz::error_code::buffer_overflow);
+   };
+
+   // A byte string has no JSON counterpart and becomes a string of hex digit pairs, whether its
+   // length is known up front or it arrives in chunks.
+   "cbor_to_json_byte_string_hex"_test = [] {
+      const std::array<uint8_t, 4> definite{0x43, 0x01, 0xab, 0xff}; // bytes(3)
+      expect(glz::cbor_to_json(definite).value() == "\"01abff\"");
+
+      // indefinite: two chunks then break
+      const std::array<uint8_t, 7> indefinite{0x5f, 0x42, 0x01, 0xab, 0x41, 0xff, 0xff};
+      expect(glz::cbor_to_json(indefinite).value() == "\"01abff\"");
+
+      const std::array<uint8_t, 2> empty_chunks{0x5f, 0xff};
+      expect(glz::cbor_to_json(empty_chunks).value() == "\"\"");
+   };
+
+   // RFC 8746 tags 80 and 84 hold half precision elements, which widen to double on the way out.
+   // Tags 83 and 87 hold binary128, which has no C++ representation here and is refused before
+   // any part of the array is written.
+   "cbor_to_json_typed_array_float_widths"_test = [] {
+      const std::array<uint8_t, 7> half{0xd8, 0x50, 0x44, 0x3c, 0x00, 0xc0, 0x00}; // tag(80) bytes(4)
+      expect(glz::cbor_to_json(half).value() == "[1,-2]");
+
+      const std::array<uint8_t, 3> binary128{0xd8, 0x53, 0x40}; // tag(83) bytes(0)
+      expect(glz::cbor_to_json(binary128).error().ec == glz::error_code::feature_not_supported);
+   };
+
+   // At depth zero a prettified line break writes '\n' and nothing else, which used to leave the
+   // write index one past the end of a buffer that cannot grow and form &out[size] to memset zero
+   // bytes through. The address is out of range whether or not the memset touches it.
+   "cbor_to_json_prettify_exact_fit_fixed_buffer"_test = [] {
+      constexpr glz::opts pretty{.prettify = true};
+
+      const std::array<uint8_t, 3> input{0xa1, 0x40, 0xa0}; // map(1){ bytes(0): map(0) }
+      constexpr std::string_view expected = "{\n   \"\": {}\n}";
+
+      std::array<char, expected.size()> exact{};
+      const auto ec = glz::cbor_to_json<pretty>(input, exact);
+      expect(not ec);
+      expect(std::string_view{exact.data(), ec.count} == expected);
+
+      std::array<char, expected.size() - 1> short_by_one{};
+      expect(glz::cbor_to_json<pretty>(input, short_by_one).ec == glz::error_code::buffer_overflow);
+   };
+
+   "cbor_to_json_prettify_non_empty_map"_test = [] {
+      constexpr glz::opts pretty{.prettify = true};
+
+      const std::array<uint8_t, 4> definite{0xa1, 0x61, 'a', 0x01}; // map(1){ "a": 1 }
+      expect(glz::cbor_to_json<pretty>(definite).value() == "{\n   \"a\": 1\n}");
+
+      const std::array<uint8_t, 5> indefinite{0xbf, 0x61, 'a', 0x01, 0xff}; // map(*){ "a": 1 }
+      expect(glz::cbor_to_json<pretty>(indefinite).value() == "{\n   \"a\": 1\n}");
+
+      // An empty nested map must not disturb the indentation of the map holding it.
+      const std::array<uint8_t, 5> nested{0xa1, 0x61, 'a', 0xbf, 0xff}; // map(1){ "a": map(*){} }
+      expect(glz::cbor_to_json<pretty>(nested).value() == "{\n   \"a\": {}\n}");
    };
 }
 
@@ -3570,6 +3792,60 @@ void cbor_skip_marker_tests_run()
    };
 }
 
+namespace cbor_skip_wellformed_tests
+{
+   struct one_member
+   {
+      int a{};
+   };
+
+   inline constexpr glz::opts skip_opts{.format = glz::CBOR, .error_on_unknown_keys = false};
+
+   // A one-pair map whose key "zz" is not a member, so its value goes through skip_value<CBOR>.
+   template <class... Bytes>
+   std::vector<uint8_t> unknown_value(Bytes... value_bytes)
+   {
+      return {0xA1, 0x62, 'z', 'z', static_cast<uint8_t>(value_bytes)...};
+   }
+}
+
+suite cbor_skip_wellformed = [] {
+   using namespace cbor_skip_wellformed_tests;
+
+   // additional_info 31 marks indefinite length, which is only well-formed for byte/text
+   // strings, arrays, and maps. On major type 0 (uint), 1 (nint), or 6 (tag) it is not
+   // well-formed (RFC 8949 Appendix C). The reader's decode_arg already rejects it; the
+   // skip path must agree instead of consuming the item and reporting success.
+   "skip rejects indefinite marker on uint"_test = [] {
+      one_member v{};
+      expect(glz::read<skip_opts>(v, unknown_value(0x1F)).ec == glz::error_code::syntax_error);
+   };
+
+   "skip rejects indefinite marker on nint"_test = [] {
+      one_member v{};
+      expect(glz::read<skip_opts>(v, unknown_value(0x3F)).ec == glz::error_code::syntax_error);
+   };
+
+   "skip rejects indefinite marker on tag"_test = [] {
+      one_member v{};
+      // Tag (0xDF) followed by a well-formed uint so the failure is the marker, not a short read.
+      expect(glz::read<skip_opts>(v, unknown_value(0xDF, 0x05)).ec == glz::error_code::syntax_error);
+   };
+
+   "skip accepts well-formed unknown values"_test = [] {
+      one_member a{};
+      expect(not glz::read<skip_opts>(a, unknown_value(0x05))); // uint 5
+      one_member b{};
+      expect(not glz::read<skip_opts>(b, unknown_value(0x19, 0x01, 0x2C))); // uint 300
+      one_member c{};
+      expect(not glz::read<skip_opts>(c, unknown_value(0x7F, 0x61, 'a', 0x61, 'b', 0xFF))); // indefinite text
+      one_member d{};
+      expect(not glz::read<skip_opts>(d, unknown_value(0x5F, 0x41, 0x01, 0x41, 0x02, 0xFF))); // indefinite bytes
+      one_member e{};
+      expect(not glz::read<skip_opts>(e, unknown_value(0x9F, 0x01, 0x02, 0xFF))); // indefinite array
+   };
+};
+
 // A std::variant whose own meta opts into custom_read/custom_write (with full from/to
 // specializations) must not be ambiguous with the built-in CBOR variant handlers.
 // Parity with the JSON fix in #2591.
@@ -3639,6 +3915,27 @@ suite cbor_byte_and_char_array_tests = [] {
       std::vector<std::byte> dst{};
       expect(not glz::read_cbor(dst, buffer));
       expect(dst == src);
+   };
+
+   // An empty payload into a default-constructed vector leaves data() null, and memcpy is not
+   // allowed a null argument even for a zero count. Both the definite and the indefinite byte
+   // string reach that memcpy, so both are covered here -- this is a UBSan-only failure.
+   "cbor empty byte string does not memcpy from a null pointer"_test = [] {
+      {
+         std::vector<std::byte> dst{}; // data() == nullptr
+         expect(not glz::read_cbor(dst, std::string("\x40", 1))); // bstr(0)
+         expect(dst.empty());
+      }
+      {
+         std::vector<std::byte> dst{};
+         expect(not glz::read_cbor(dst, std::string("\x5F\x40\xFF", 3))); // bstr(*) { bstr(0) }
+         expect(dst.empty());
+      }
+      {
+         std::vector<std::byte> dst{};
+         expect(not glz::read_cbor(dst, std::string("\x5F\xFF", 2))); // bstr(*) {}
+         expect(dst.empty());
+      }
    };
 
    "cbor std::array<std::byte, N> round trips"_test = [] {

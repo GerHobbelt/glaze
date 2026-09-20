@@ -228,6 +228,83 @@ namespace glz
       return N; // not found
    }
 
+   // Parse the value of field I once the ':' and the whitespace around it have been consumed.
+   // Shared by the hash-dispatch and the linear-search object paths. `FieldOpts` is what the field's
+   // own parser receives: the hash path has already consumed the leading whitespace (ws_handled),
+   // the linear path passes Opts through unchanged to avoid a second set of instantiations.
+   //
+   // `meta::skip` is a compile-time decision, so the field's reader lives in the `else` branch rather
+   // than after an early `return`. A `return` inside an `if constexpr` stops the field from being read
+   // at runtime, but the code that follows it is still instantiated -- which defeats skipping a field
+   // precisely because its type has no reader (no `from` specialization, or a non-owning view that
+   // GLZ_ASSERT_OWNS_ITS_BYTES rejects for a streaming read).
+   template <auto Opts, auto FieldOpts, class T, size_t I, class Value, class... SelectedIndex>
+      requires(glaze_object_t<T> || reflectable<T>)
+   GLZ_ALWAYS_INLINE void decode_field_value(Value&& value, is_context auto&& ctx, auto&& it, auto&& end,
+                                             SelectedIndex&&... selected_index)
+   {
+      // Check for null value skipping on read
+      if constexpr (check_skip_null_members_on_read(Opts)) {
+         if (*it == 'n') {
+            ++it;
+            if constexpr (not Opts.null_terminated) {
+               if (it == end) [[unlikely]] {
+                  ctx.error = error_code::unexpected_end;
+                  return;
+               }
+            }
+            match<"ull", Opts>(ctx, it, end);
+            if (bool(ctx.error)) [[unlikely]]
+               return;
+            // Successfully matched "null", skip it
+            if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+               ((selected_index = I), ...); // Mark as handled even if skipped
+            }
+            return;
+         }
+      }
+
+      if constexpr (skipped_by_meta<T, I, operation::parse>) {
+         skip_value<JSON>::op<Opts>(ctx, it, end);
+         if (bool(ctx.error)) [[unlikely]]
+            return; // Propagate error from skip_value
+      }
+      else {
+         using V = refl_t<T, I>;
+
+         if constexpr (const_value_v<V>) {
+            if constexpr (check_error_on_const_read(Opts)) {
+               ctx.error = error_code::attempt_const_read;
+            }
+            else {
+               // do not read anything into the const value
+               skip_value<JSON>::op<Opts>(ctx, it, end);
+            }
+         }
+         else if constexpr (is_function_ptr_or_ref<V>) {
+            // Function pointers cannot be deserialized from JSON.
+            // When write_function_pointers is enabled the writer emits a type-name string,
+            // but there is nothing meaningful to reconstruct on read — just skip the value.
+            // When write_function_pointers is off the key is never written, so this branch
+            // is unreachable in that case.
+            skip_value<JSON>::op<Opts>(ctx, it, end);
+         }
+         else if constexpr (glaze_object_t<T>) {
+            from<JSON, std::remove_cvref_t<V>>::template op<FieldOpts>(get_member(value, get<I>(reflect<T>::values)),
+                                                                       ctx, it, end);
+         }
+         else {
+            from<JSON, std::remove_cvref_t<V>>::template op<FieldOpts>(get_member(value, get<I>(to_tie(value))), ctx,
+                                                                       it, end);
+         }
+      }
+
+      // The key was present and handled, even when the value itself was skipped
+      if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
+         ((selected_index = I), ...);
+      }
+   }
+
    template <auto Opts, class T, size_t I, class Value, class... SelectedIndex>
       requires(glaze_object_t<T> || reflectable<T>)
    void decode_index(Value&& value, is_context auto&& ctx, auto&& it, auto&& end, SelectedIndex&&... selected_index)
@@ -255,73 +332,8 @@ namespace glz
             return;
          }
 
-         // Check for null value skipping on read
-         if constexpr (check_skip_null_members_on_read(Opts)) {
-            if (*it == 'n') {
-               ++it;
-               if constexpr (not Opts.null_terminated) {
-                  if (it == end) [[unlikely]] {
-                     ctx.error = error_code::unexpected_end;
-                     return;
-                  }
-               }
-               match<"ull", Opts>(ctx, it, end);
-               if (bool(ctx.error)) [[unlikely]]
-                  return;
-               // Successfully matched "null", skip it
-               if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
-                  ((selected_index = I), ...); // Mark as handled even if skipped
-               }
-               return;
-            }
-         }
-
-         // Check for operation-specific skipping
-         if constexpr (meta_has_skip<std::remove_cvref_t<T>>) {
-            if constexpr (meta<std::remove_cvref_t<T>>::skip(Key, {glz::operation::parse})) {
-               skip_value<JSON>::op<Opts>(ctx, it, end);
-               if (bool(ctx.error)) [[unlikely]]
-                  return; // Propagate error from skip_value
-               if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
-                  ((selected_index = I), ...); // Mark as handled even if skipped
-               }
-               return;
-            }
-         }
-
-         using V = refl_t<T, I>;
-
-         if constexpr (const_value_v<V>) {
-            if constexpr (check_error_on_const_read(Opts)) {
-               ctx.error = error_code::attempt_const_read;
-            }
-            else {
-               // do not read anything into the const value
-               skip_value<JSON>::op<Opts>(ctx, it, end);
-            }
-         }
-         else if constexpr (is_function_ptr_or_ref<V>) {
-            // Function pointers cannot be deserialized from JSON.
-            // When write_function_pointers is enabled the writer emits a type-name string,
-            // but there is nothing meaningful to reconstruct on read — just skip the value.
-            // When write_function_pointers is off the key is never written, so this branch
-            // is unreachable in that case.
-            skip_value<JSON>::op<Opts>(ctx, it, end);
-         }
-         else {
-            if constexpr (glaze_object_t<T>) {
-               from<JSON, std::remove_cvref_t<V>>::template op<ws_handled<Opts>()>(
-                  get_member(value, get<I>(reflect<T>::values)), ctx, it, end);
-            }
-            else {
-               from<JSON, std::remove_cvref_t<V>>::template op<ws_handled<Opts>()>(
-                  get_member(value, get<I>(to_tie(value))), ctx, it, end);
-            }
-         }
-
-         if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
-            ((selected_index = I), ...);
-         }
+         // The hash path has already consumed the whitespace before the value
+         decode_field_value<Opts, ws_handled<Opts>(), T, I>(value, ctx, it, end, selected_index...);
       }
       else [[unlikely]] {
          decode_index_unknown_key<Opts, T>(value, ctx, it, end);
@@ -415,66 +427,13 @@ namespace glz
             return;
          }
 
-         // Fold expression dispatch - avoids jump table overhead for smaller binary size
-         auto parse_field = [&]<size_t I>() {
-            if constexpr (check_skip_null_members_on_read(Opts)) {
-               if (*it == 'n') {
-                  ++it;
-                  if constexpr (not Opts.null_terminated) {
-                     if (it == end) [[unlikely]] {
-                        ctx.error = error_code::unexpected_end;
-                        return;
-                     }
-                  }
-                  match<"ull", Opts>(ctx, it, end);
-                  if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
-                     ((selected_index = I), ...);
-                  }
-                  return;
-               }
-            }
-
-            // Check for operation-specific skipping
-            if constexpr (meta_has_skip<std::remove_cvref_t<T>>) {
-               constexpr auto Key = get<I>(reflect<T>::keys);
-               if constexpr (meta<std::remove_cvref_t<T>>::skip(Key, {glz::operation::parse})) {
-                  skip_value<JSON>::op<Opts>(ctx, it, end);
-                  if (bool(ctx.error)) [[unlikely]]
-                     return;
-                  if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
-                     ((selected_index = I), ...);
-                  }
-                  return;
-               }
-            }
-
-            using V = refl_t<T, I>;
-            if constexpr (const_value_v<V>) {
-               if constexpr (check_error_on_const_read(Opts)) {
-                  ctx.error = error_code::attempt_const_read;
-               }
-               else {
-                  skip_value<JSON>::op<Opts>(ctx, it, end);
-               }
-            }
-            else {
-               // For linear_search, use Opts directly to avoid duplicate template instantiations
-               // We've already skipped whitespace before reaching here
-               if constexpr (glaze_object_t<T>) {
-                  from<JSON, std::remove_cvref_t<V>>::template op<Opts>(get_member(value, get<I>(reflect<T>::values)),
-                                                                        ctx, it, end);
-               }
-               else {
-                  from<JSON, std::remove_cvref_t<V>>::template op<Opts>(get_member(value, get<I>(to_tie(value))), ctx,
-                                                                        it, end);
-               }
-            }
-            if constexpr (Opts.error_on_missing_keys || Opts.partial_read) {
-               ((selected_index = I), ...);
-            }
-         };
+         // Fold expression dispatch - avoids jump table overhead for smaller binary size.
+         // For linear_search, pass Opts through to the field parser to avoid duplicate template
+         // instantiations; the whitespace before the value has already been skipped either way.
          [&]<size_t... Is>(std::index_sequence<Is...>) {
-            (void)(((index == Is ? (parse_field.template operator()<Is>(), true) : false) || ...));
+            (void)(((index == Is ? (decode_field_value<Opts, Opts, T, Is>(value, ctx, it, end, selected_index...), true)
+                                 : false) ||
+                    ...));
          }(std::make_index_sequence<N>{});
       }
       else {
@@ -3339,6 +3298,7 @@ namespace glz
                            skip_value<JSON>::op<Opts>(ctx, it, end);
                            if (bool(ctx.error)) [[unlikely]]
                               return;
+                           resync_window_end(ctx, end); // a streaming skip refills
                            if (skip_ws<Opts>(ctx, it, end)) {
                               return;
                            }
@@ -3947,18 +3907,24 @@ namespace glz
          }
          ++ctx.depth;
 
-         const auto obj_start = it;
+         // Adjacent tagging reads the object twice -- once to find the discriminator, once to read
+         // the content into the alternative it named -- so `walk` returns here at the start of each
+         // pass. Under a streaming read those two passes straddle refills, which is what the anchor
+         // is for; a raw pointer would address relocated bytes by the second one.
+         auto obj_start = make_rewind_anchor(ctx, it);
 
          // Walk the members, handing each key to `on_key`, which must consume that key's value.
          // Leaves `it` just past the closing brace. Returns false once an error has been set.
          const auto walk = [&](auto&& on_key) {
-            it = obj_start;
+            if (!obj_start.rewind(ctx, it, end)) {
+               return false;
+            }
             if (skip_ws<Opts>(ctx, it, end)) {
                return false;
             }
-            const auto first = it;
+            bool first_key = true;
             while (*it != '}') {
-               if (it != first) {
+               if (!first_key) {
                   if (match_invalid_end<',', Opts>(ctx, it, end)) {
                      return false;
                   }
@@ -3987,6 +3953,10 @@ namespace glz
                if (!on_key(key)) {
                   return false;
                }
+               // on_key consumed a value, and a streaming read refills inside one, which leaves the
+               // window edge this frame is holding behind.
+               resync_window_end(ctx, end);
+               first_key = false;
                if (skip_ws<Opts>(ctx, it, end)) {
                   return false;
                }
@@ -4009,7 +3979,9 @@ namespace glz
                       from<JSON, id_type>::template op<ws_handled<Opts>()>(type_id, ctx, it, end);
                    }
                    else {
-                      from<JSON, sv>::template op<ws_handled<Opts>()>(type_id, ctx, it, end);
+                      // The id is turned into an index below and never leaves this reader, so the
+                      // view of the window it borrows cannot outlive that window.
+                      parse_transient_string_view<ws_handled<Opts>()>(type_id, ctx, it, end);
                    }
                    if (bool(ctx.error)) [[unlikely]] {
                       return false;
@@ -4155,7 +4127,11 @@ namespace glz
                   if (skip_ws<Opts>(ctx, it, end)) {
                      return;
                   }
-                  auto start = it;
+                  // Once the reader knows which alternative this object holds it may have to read
+                  // it again from here. Anchor the position rather than keep the pointer: the scan
+                  // below skips values, and a streaming skip refills, which moves the window out
+                  // from under a raw pointer (see rewind_anchor).
+                  auto start = make_rewind_anchor(ctx, it);
                   bool first_key = true;
                   // Parse bifurcation for tagged variants:
                   //
@@ -4171,17 +4147,20 @@ namespace glz
                   // One exception: if the tag name is also a field on the resolved struct
                   // (contains_tag), we must re-parse regardless so the value is stored in
                   // the struct field. This override is applied inside each std::visit lambda.
+                  //
+                  // Either way the rewind can fail under a streaming read: the window only holds so
+                  // much, and an object wider than it has no start left to return to.
                   auto position_after_tag = [&] {
                      if (first_key) {
                         if (*it == ',') ++it; // skip comma; handles tag-only objects where *it == '}'
+                        return true;
                      }
-                     else {
-                        it = start; // tag was not the first key, re-parse from the beginning
-                     }
+                     return start.rewind(ctx, it, end); // tag came later, re-parse from the beginning
                   };
-                  while (*it != '}') {
-                     if (it != start) {
-                        first_key = false;
+                  // `first_key` also answers "were we reset to the object start", which is what
+                  // position_after_tag does for every key but the first.
+                  for (; *it != '}'; first_key = false) {
+                     if (!first_key) {
                         if (match_invalid_end<',', Opts>(ctx, it, end)) {
                            return;
                         }
@@ -4221,7 +4200,9 @@ namespace glz
                                  from<JSON, id_type>::template op<ws_handled<Opts>()>(type_id, ctx, it, end);
                               }
                               else {
-                                 from<JSON, sv>::template op<ws_handled<Opts>()>(type_id, ctx, it, end);
+                                 // The id is turned into an index below and never leaves this
+                                 // reader, so the view of the window it borrows cannot outlive it.
+                                 parse_transient_string_view<ws_handled<Opts>()>(type_id, ctx, it, end);
                               }
                               if (bool(ctx.error)) [[unlikely]]
                                  return;
@@ -4254,7 +4235,7 @@ namespace glz
                                     return;
                                  }
 
-                                 position_after_tag();
+                                 if (!position_after_tag()) return;
                                  tag_specified_index = type_index; // Store the tag-specified type
                                  if (value.index() != type_index) emplace_runtime_variant(value, type_index);
                                  std::visit(
@@ -4273,7 +4254,8 @@ namespace glz
                                        }
                                        else if constexpr (is_object) {
                                           if constexpr (contains_tag<V, tag_literal>()) {
-                                             it = start; // tag is a struct field, must re-parse
+                                             // tag is a struct field, must re-parse
+                                             if (!start.rewind(ctx, it, end)) return;
                                           }
                                           from<JSON, V>::template op<opening_handled<Opts>(), tag_literal>(v, ctx, it,
                                                                                                            end);
@@ -4310,7 +4292,8 @@ namespace glz
                                              }
                                           }
                                           if constexpr (contains_tag<memory_type<V>, tag_literal>()) {
-                                             it = start; // tag is a struct field, must re-parse
+                                             // tag is a struct field, must re-parse
+                                             if (!start.rewind(ctx, it, end)) return;
                                           }
                                           from<JSON, memory_type<V>>::template op<opening_handled<Opts>(), tag_literal>(
                                              *v, ctx, it, end);
@@ -4321,7 +4304,7 @@ namespace glz
                                           // This only works when the tag was the first key. If it came later,
                                           // we were reset to the object start and the custom handler would
                                           // absorb the tag, so error rather than corrupt the value.
-                                          if (it == start) {
+                                          if (!first_key) {
                                              ctx.error = error_code::feature_not_supported;
                                              ctx.custom_error_message =
                                                 "the tag must be the first key for a custom variant alternative";
@@ -4342,7 +4325,7 @@ namespace glz
                                     // Use the first unlabeled type as the default
                                     const auto default_type_index = ids_size;
 
-                                    position_after_tag();
+                                    if (!position_after_tag()) return;
                                     tag_specified_index = default_type_index; // Store the default type index
                                     if (value.index() != default_type_index)
                                        emplace_runtime_variant(value, default_type_index);
@@ -4363,7 +4346,8 @@ namespace glz
                                           }
                                           else if constexpr (is_object) {
                                              if constexpr (contains_tag<V, tag_literal>()) {
-                                                it = start; // tag is a struct field, must re-parse
+                                                // tag is a struct field, must re-parse
+                                                if (!start.rewind(ctx, it, end)) return;
                                              }
                                              from<JSON, V>::template op<opening_handled<Opts>()>(v, ctx, it, end);
                                           }
@@ -4397,7 +4381,8 @@ namespace glz
                                                 }
                                              }
                                              if constexpr (contains_tag<memory_type<V>, tag_literal>()) {
-                                                it = start; // tag is a struct field, must re-parse
+                                                // tag is a struct field, must re-parse
+                                                if (!start.rewind(ctx, it, end)) return;
                                              }
                                              from<JSON, memory_type<V>>::template op<opening_handled<Opts>()>(*v, ctx,
                                                                                                               it, end);
@@ -4407,7 +4392,7 @@ namespace glz
                                              // works when the tag was the first key (see above). If it came
                                              // later we were reset to the object start, so error rather than
                                              // let the custom handler absorb the tag.
-                                             if (it == start) {
+                                             if (!first_key) {
                                                 ctx.error = error_code::feature_not_supported;
                                                 ctx.custom_error_message =
                                                    "the tag must be the first key for a custom variant alternative";
@@ -4451,8 +4436,10 @@ namespace glz
                               return;
                            }
 
+                           // The id is turned into an index below and never leaves this reader,
+                           // so the view of the window it borrows cannot outlive that window.
                            std::string_view type_id{};
-                           parse<JSON>::op<ws_handled<Opts>()>(type_id, ctx, it, end);
+                           parse_transient_string_view<ws_handled<Opts>()>(type_id, ctx, it, end);
                            if (bool(ctx.error)) [[unlikely]]
                               return;
                            if (skip_ws<Opts>(ctx, it, end)) {
@@ -4462,7 +4449,7 @@ namespace glz
                            const auto type_index = variant_id_to_index<T>::op(
                               type_id.data(), type_id.data() + type_id.size(), type_id.size());
                            if (type_index < ids_v<T>.size()) [[likely]] {
-                              position_after_tag();
+                              if (!position_after_tag()) return;
                               tag_specified_index = type_index; // Store the tag-specified type
                               if (value.index() != type_index) emplace_runtime_variant(value, type_index);
                            }
@@ -4472,7 +4459,7 @@ namespace glz
                               constexpr auto variant_size = std::variant_size_v<T>;
                               if constexpr (ids_size < variant_size) {
                                  // Use the first unlabeled type as the default
-                                 position_after_tag();
+                                 if (!position_after_tag()) return;
                                  const auto default_index = ids_size;
                                  tag_specified_index = default_index; // Store the default type index
                                  if (value.index() != default_index) emplace_runtime_variant(value, default_index);
@@ -4494,7 +4481,7 @@ namespace glz
                                     // just consumed). If the tag came after other keys, position_after_tag()
                                     // reset us to the object start and the custom handler would absorb the tag
                                     // into its value, so error here rather than corrupt the result.
-                                    if (it == start) {
+                                    if (!first_key) {
                                        ctx.error = error_code::feature_not_supported;
                                        ctx.custom_error_message =
                                           "the tag must be the first key for a custom variant alternative";
@@ -4504,7 +4491,8 @@ namespace glz
                                  }
                                  else {
                                     if constexpr (contains_tag<V, tag_literal>()) {
-                                       it = start; // tag is a struct field, must re-parse
+                                       // tag is a struct field, must re-parse
+                                       if (!start.rewind(ctx, it, end)) return;
                                     }
                                     from<JSON, V>::template op<opening_handled<Opts>(), tag_literal>(v, ctx, it, end);
                                  }
@@ -4524,6 +4512,7 @@ namespace glz
                            skip_value<JSON>::op<Opts>(ctx, it, end);
                            if (bool(ctx.error)) [[unlikely]]
                               return;
+                           resync_window_end(ctx, end); // a streaming skip refills
                            if (skip_ws<Opts>(ctx, it, end)) {
                               return;
                            }
@@ -4543,7 +4532,7 @@ namespace glz
                      // Only short-circuit for variants without tags
                      else if constexpr (tag_v<T>.empty()) {
                         if (matching_types == 1) {
-                           it = start;
+                           if (!start.rewind(ctx, it, end)) return;
                            const auto type_index = possible_types.countr_zero();
 
                            if (value.index() != static_cast<size_t>(type_index))
@@ -4615,6 +4604,7 @@ namespace glz
                      skip_value<JSON>::op<Opts>(ctx, it, end);
                      if (bool(ctx.error)) [[unlikely]]
                         return;
+                     resync_window_end(ctx, end); // a streaming skip refills
                      if (skip_ws<Opts>(ctx, it, end)) {
                         return;
                      }
@@ -4638,7 +4628,7 @@ namespace glz
                            return;
                         }
 
-                        it = start;
+                        if (!start.rewind(ctx, it, end)) return;
                         if (value.index() != static_cast<size_t>(type_index))
                            emplace_runtime_variant(value, type_index);
                         std::visit(
@@ -4740,7 +4730,7 @@ namespace glz
                               return;
                            }
 
-                           it = start;
+                           if (!start.rewind(ctx, it, end)) return;
                            if (value.index() != chosen_index) emplace_runtime_variant(value, chosen_index);
                            std::visit(
                               [&](auto&& v) {

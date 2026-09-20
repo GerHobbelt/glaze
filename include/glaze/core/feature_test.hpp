@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <version>
+
 // Detect constexpr std::string support
 // The old GCC ABI (_GLIBCXX_USE_CXX11_ABI=0) does not have constexpr std::string::size()
 // This affects features like rename_key returning std::string
@@ -26,11 +28,8 @@
 #endif
 
 // C++26 P2988 std::optional<T&> support.
-// Pre-P2988 stdlibs report __cpp_lib_optional == 202110L (the C++23 monadic-ops value);
-// any post-C++23 bump indicates optional<T&> is available. Used by glz::inplace_vector to
-// match the C++26 P3981 try_emplace_back / try_push_back return type.
 #ifndef GLZ_HAS_OPTIONAL_REF
-#if defined(__cpp_lib_optional) && __cpp_lib_optional > 202110L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
 #define GLZ_HAS_OPTIONAL_REF 1
 #else
 #define GLZ_HAS_OPTIONAL_REF 0
@@ -53,6 +52,28 @@ namespace glz
 }
 
 // Glaze Feature Test Macros for breaking changes
+
+// v8.3.0 fixes GLZ_NO_UNIQUE_ADDRESS on the MSVC ABI
+//
+// The macro tested the standard [[no_unique_address]] before [[msvc::no_unique_address]].
+// MSVC accepts the standard spelling but gives it no layout effect, so a front end that
+// reports it through __has_cpp_attribute would select the inert form and lose the empty
+// member optimization. This can shrink glz::tuple, glz::lazy_document and glz::ordered_map
+// on MSVC, which is a layout change for object files built against an older Glaze.
+#define glaze_v8_3_0_msvc_no_unique_address
+
+// v8.3.0 reimplements glz::tuple and moves it to <glaze/core/tuple.hpp>
+//
+// glz::tuple keeps its API but is now a fresh implementation with no third-party
+// lineage, so <glaze/glaze.hpp> no longer carries a non-MIT dependency. Element
+// access is a base-class cast rather than an operator[] overload set, which cuts
+// tuple compile time without changing generated code.
+//
+// <glaze/tuplet/tuple.hpp> still forwards to the new location and will be removed
+// in a future major release. The glz::tuplet namespace retains make_tuple,
+// forward_as_tuple, tuple_cat and convert; its internal metaprogramming helpers
+// (tag, type_list, base_list, tuple_elem, ...) are gone.
+#define glaze_v8_3_0_tuple
 
 // v7.7.0 drops glaze/msgpack.hpp from the glaze/glaze.hpp aggregate header.
 //

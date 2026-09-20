@@ -18,6 +18,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <source_location>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -25,13 +26,10 @@
 #include "glaze/ext/glaze_asio.hpp"
 #include "glaze/net/http_headers.hpp"
 #include "glaze/net/http_router.hpp"
+#include "glaze/net/ssl.hpp"
 #include "glaze/util/env.hpp"
 #include "glaze/util/itoa.hpp"
 #include "glaze/util/key_transformers.hpp"
-
-#ifdef GLZ_ENABLE_SSL
-#include <openssl/ssl.h> // For SSL_set_tlsext_host_name
-#endif
 
 namespace glz
 {
@@ -68,67 +66,11 @@ namespace glz
    // Socket type aliases for HTTP client
    using tcp_socket = asio::ip::tcp::socket;
 #ifdef GLZ_ENABLE_SSL
-   using ssl_socket = asio::ssl::stream<asio::ip::tcp::socket>;
    using socket_variant = std::variant<std::shared_ptr<tcp_socket>, std::shared_ptr<ssl_socket>>;
 #else
    using socket_variant = std::variant<std::shared_ptr<tcp_socket>>;
 #endif
 
-   // SSL error codes for detailed error reporting
-   enum class ssl_error {
-      success = 0,
-      ssl_not_supported, // HTTPS requested but SSL support not compiled in
-      sni_hostname_failed // Failed to set SNI hostname (SSL_set_tlsext_host_name)
-      // Note: Handshake and certificate errors propagate as native ASIO/OpenSSL error codes
-      // for more detailed error information
-   };
-
-   // SSL error category for std::error_code integration
-   class ssl_error_category : public std::error_category
-   {
-     public:
-      const char* name() const noexcept override { return "glaze.ssl"; }
-
-      std::string message(int ev) const override
-      {
-         switch (static_cast<ssl_error>(ev)) {
-         case ssl_error::success:
-            return "Success";
-         case ssl_error::ssl_not_supported:
-            return "SSL/TLS not supported: GLZ_ENABLE_SSL not defined";
-         case ssl_error::sni_hostname_failed:
-            return "Failed to set SNI hostname for TLS connection";
-         default:
-            return "Unknown SSL error";
-         }
-      }
-
-      // Map to equivalent standard error conditions where applicable
-      std::error_condition default_error_condition(int ev) const noexcept override
-      {
-         switch (static_cast<ssl_error>(ev)) {
-         case ssl_error::ssl_not_supported:
-            return std::errc::protocol_not_supported;
-         case ssl_error::sni_hostname_failed:
-            return std::errc::protocol_error;
-         default:
-            return std::error_condition(ev, *this);
-         }
-      }
-   };
-
-   // Get the singleton instance of the SSL error category
-   inline const ssl_error_category& get_ssl_error_category() noexcept
-   {
-      static ssl_error_category instance;
-      return instance;
-   }
-
-   // Create std::error_code from ssl_error
-   inline std::error_code make_error_code(ssl_error e) noexcept
-   {
-      return {static_cast<int>(e), get_ssl_error_category()};
-   }
    // HTTP client error codes
    enum class http_client_error {
       success = 0,
@@ -168,11 +110,6 @@ namespace glz
       return {static_cast<int>(e), get_http_client_error_category()};
    }
 } // namespace glz
-
-// Enable automatic conversion from glz::ssl_error to std::error_code
-template <>
-struct std::is_error_code_enum<glz::ssl_error> : std::true_type
-{};
 
 template <>
 struct std::is_error_code_enum<glz::http_client_error> : std::true_type
@@ -268,23 +205,65 @@ namespace glz
       {
          const bool is_default_port = (!use_https && url.port == 80) || (use_https && url.port == 443);
 
+         // This builder owns the single Host and Connection field on the wire, the
+         // same way it owns the body framing below. A caller's value replaces the
+         // writer's default instead of riding alongside it, and only the first
+         // usable one is kept: RFC 9112 3.2 admits exactly one Host, and a second
+         // one lets an intermediary and the origin resolve the same request to
+         // different authorities (request smuggling) - glaze's own server answers a
+         // repeat with 400. Connection is likewise reduced to one field, since a
+         // "close" and a "keep-alive" on the same message leave each hop to pick a
+         // different connection lifetime. glz::http_headers keeps repeats, so a
+         // single lookup would not have caught the second one.
+         //
+         // A field carrying CR or LF is not usable, because the loop below drops it
+         // rather than write a split message. Taking one here would suppress the
+         // writer's default and send an HTTP/1.1 request with no Host at all.
+         const std::string* caller_host = nullptr;
+         const std::string* caller_connection = nullptr;
+         for (const auto& [name, value] : headers) {
+            if (header_field_has_crlf(name, value)) [[unlikely]] {
+               continue;
+            }
+            if (glz::striequal(name, "host")) {
+               if (!caller_host) {
+                  caller_host = &value;
+               }
+            }
+            else if (glz::striequal(name, "connection")) {
+               if (!caller_connection) {
+                  caller_connection = &value;
+               }
+            }
+         }
+
          std::string request_str;
          request_str.reserve(512 + body.size());
          request_str.append(method);
          request_str.append(" ");
          request_str.append(url.path);
          request_str.append(" HTTP/1.1\r\n");
+         // RFC 9112 5: a user agent SHOULD generate Host as the first field after
+         // the request-line, so a caller's value is written in this slot rather
+         // than wherever it happened to sit among their headers.
          request_str.append("Host: ");
-         request_str.append(url.host);
-         if (!is_default_port) {
-            char
-               port_buf[8]; // a uint16_t port is at most 5 digits; pad so the sizing does not depend on itoa internals
-            auto* end = glz::to_chars(port_buf, url.port);
-            request_str.push_back(':');
-            request_str.append(port_buf, static_cast<size_t>(end - port_buf));
+         if (caller_host) {
+            request_str.append(*caller_host);
+         }
+         else {
+            request_str.append(url.host);
+            if (!is_default_port) {
+               // A uint16_t port is at most 5 digits; pad so the sizing does not depend on itoa internals
+               char port_buf[8];
+               auto* end = glz::to_chars(port_buf, url.port);
+               request_str.push_back(':');
+               request_str.append(port_buf, static_cast<size_t>(end - port_buf));
+            }
          }
          request_str.append("\r\n");
-         request_str.append("Connection: keep-alive\r\n");
+         request_str.append("Connection: ");
+         request_str.append(caller_connection ? std::string_view{*caller_connection} : "keep-alive");
+         request_str.append("\r\n");
          // RFC 9110 8.6: a user agent SHOULD send Content-Length when the method
          // anticipates content, even for an empty body - origin servers and proxies
          // commonly answer a bodyless POST with 411 Length Required. Since a caller's
@@ -312,6 +291,12 @@ namespace glz
             // (RFC 9112 6.3, request smuggling). glz::http_headers keeps
             // repeats, so a single lookup would not have caught the second one.
             if (header_field_frames_body(name)) [[unlikely]] {
+               continue;
+            }
+            // Host and Connection were resolved above and written once; whatever
+            // the caller supplied is already on the wire (or was rejected there),
+            // so every field of either name is skipped here.
+            if (glz::striequal(name, "host") || glz::striequal(name, "connection")) {
                continue;
             }
             request_str.append(name);
@@ -397,99 +382,6 @@ namespace glz
          }
          return headers;
       }
-
-#ifdef GLZ_ENABLE_SSL
-      // Configure SNI and hostname verification for client TLS connections.
-      inline bool configure_ssl_client_hostname(ssl_socket& sock, const std::string& host)
-      {
-         if (!SSL_set_tlsext_host_name(sock.native_handle(), host.c_str())) {
-            return false;
-         }
-
-         sock.set_verify_callback(asio::ssl::host_name_verification(host));
-         return true;
-      }
-
-      enum class ssl_ca_source { explicit_file, env_ssl_cert_file, env_ssl_cert_dir, default_verify_paths };
-
-      inline std::optional<std::string_view> non_empty_path(std::optional<std::string_view> value)
-      {
-         if (value && !value->empty()) {
-            return value;
-         }
-         return std::nullopt;
-      }
-
-      inline std::optional<std::string> env_path(const char* name) { return getenv_nonempty(name); }
-
-      inline std::optional<std::string_view> to_sv_opt(const std::optional<std::string>& value)
-      {
-         if (value && !value->empty()) {
-            return std::string_view{*value};
-         }
-         return std::nullopt;
-      }
-
-      std::optional<std::string_view> to_sv_opt(std::optional<std::string>&&) = delete;
-
-      template <typename Loader>
-      concept ssl_ca_path_loader = requires(Loader&& loader, std::string_view path) {
-         { std::forward<Loader>(loader)(path) } -> std::convertible_to<std::error_code>;
-      };
-
-      template <typename Loader>
-      concept ssl_ca_default_loader = requires(Loader&& loader) {
-         { std::forward<Loader>(loader)() } -> std::convertible_to<std::error_code>;
-      };
-
-      template <ssl_ca_path_loader LoadFile, ssl_ca_path_loader LoadDir, ssl_ca_default_loader LoadDefault>
-      inline std::expected<ssl_ca_source, std::error_code> configure_ssl_ca_fallback(
-         std::optional<std::string_view> explicit_file, std::optional<std::string_view> env_cert_file,
-         std::optional<std::string_view> env_cert_dir, LoadFile&& load_file, LoadDir&& load_dir,
-         LoadDefault&& load_default)
-      {
-         std::optional<std::error_code> last_error{};
-
-         const auto try_file = [&](std::optional<std::string_view> path,
-                                   ssl_ca_source source) -> std::optional<ssl_ca_source> {
-            if (auto non_empty = non_empty_path(path)) {
-               if (const std::error_code ec = load_file(*non_empty); ec) {
-                  last_error = ec;
-               }
-               else {
-                  return source;
-               }
-            }
-            return std::nullopt;
-         };
-
-         if (auto source = try_file(explicit_file, ssl_ca_source::explicit_file)) {
-            return *source;
-         }
-
-         if (auto source = try_file(env_cert_file, ssl_ca_source::env_ssl_cert_file)) {
-            return *source;
-         }
-
-         if (auto non_empty = non_empty_path(env_cert_dir)) {
-            if (const std::error_code ec = load_dir(*non_empty); ec) {
-               last_error = ec;
-            }
-            else {
-               return ssl_ca_source::env_ssl_cert_dir;
-            }
-         }
-
-         if (const std::error_code ec = load_default(); ec) {
-            if (last_error) {
-               return std::unexpected(*last_error);
-            }
-            return std::unexpected(ec);
-         }
-
-         return ssl_ca_source::default_verify_paths;
-      }
-#endif
 
       // Helper to close a socket variant with optional SSL shutdown
       // graceful_shutdown: if true, performs SSL shutdown before closing (recommended for proper TLS termination)
@@ -743,10 +635,7 @@ namespace glz
          // Use tls_client to allow negotiation of TLS 1.2/1.3 (highest mutually supported version)
          // This automatically disables insecure protocols (SSLv3, TLS 1.0, TLS 1.1)
          ssl_context = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_client);
-         // Best effort: if default trust paths are not available on this platform,
-         // callers can still configure explicit trust roots later.
-         asio::error_code ec;
-         ssl_context->set_default_verify_paths(ec);
+         detail::seed_platform_trust_anchors(*ssl_context);
          ssl_context->set_verify_mode(asio::ssl::verify_peer);
 #endif
       }
@@ -922,6 +811,32 @@ namespace glz
          func(*ssl_context);
       }
 
+      // Trust-anchor configuration. See the http_client methods of the same names for the
+      // documented behavior; these are the locking wrappers around it.
+      std::expected<void, std::error_code> add_ca_certificate_file(std::string_view path)
+      {
+         std::unique_lock<std::shared_mutex> lock(ssl_mtx);
+         return detail::add_ca_file(*ssl_context, path);
+      }
+
+      std::expected<void, std::error_code> add_ca_certificate_directory(std::string_view path)
+      {
+         std::unique_lock<std::shared_mutex> lock(ssl_mtx);
+         return detail::add_ca_directory(*ssl_context, path);
+      }
+
+      std::expected<void, std::error_code> add_ca_certificates_pem(std::string_view pem)
+      {
+         std::unique_lock<std::shared_mutex> lock(ssl_mtx);
+         return detail::add_ca_pem(*ssl_context, pem);
+      }
+
+      std::expected<size_t, std::error_code> add_os_ca_certificates()
+      {
+         std::unique_lock<std::shared_mutex> lock(ssl_mtx);
+         return detail::load_os_ca_certificates(*ssl_context);
+      }
+
       // Configure CA trust roots for server certificate verification.
       // Fallback order:
       // 1) explicit cert bundle path (if provided)
@@ -933,8 +848,8 @@ namespace glz
       {
          std::unique_lock<std::shared_mutex> lock(ssl_mtx);
 
-         const auto env_cert_file = detail::env_path("SSL_CERT_FILE");
-         const auto env_cert_dir = detail::env_path("SSL_CERT_DIR");
+         const auto env_cert_file = getenv_nonempty("SSL_CERT_FILE");
+         const auto env_cert_dir = getenv_nonempty("SSL_CERT_DIR");
 
          auto result = detail::configure_ssl_ca_fallback(
             cert_bundle_file, detail::to_sv_opt(env_cert_file), detail::to_sv_opt(env_cert_dir),
@@ -987,6 +902,17 @@ namespace glz
       std::shared_ptr<asio::streambuf> buffer; // Use unified streambuf for all reads
       bool is_connected{false};
       std::atomic<bool> should_stop{false};
+      // Set only once the response has been read to its framed end - terminal chunk,
+      // trailer section and the final CRLF all consumed - leaving the socket
+      // positioned at the start of whatever the server sends next. Every other way a
+      // stream ends - a timeout, a caller-initiated disconnect part way through the
+      // body, a read error, or a body framed by connection close - leaves either
+      // unread response bytes or a dead peer behind, so the socket must be closed
+      // rather than handed to the next request.
+      std::atomic<bool> response_complete{false};
+      // The response asked for the connection to be closed once it is delivered, so
+      // the socket is single-use no matter how cleanly the body ends.
+      std::atomic<bool> peer_will_close{false};
       stream_read_strategy strategy{stream_read_strategy::bulk_transfer}; // Default strategy
       std::function<bool(int)> status_is_error{}; // Evaluated before treating status as failure
       bool is_https{false}; // Track if this is an HTTPS connection
@@ -1053,10 +979,14 @@ namespace glz
       size_t max_buffer_size{1024 * 1024};
       std::string body;
       glz::http_headers headers;
-      http_connect_handler on_connect;
-      http_disconnect_handler on_disconnect;
+      // Declared in the order callers reach for them. Designators must appear in
+      // declaration order (gcc and MSVC enforce this; clang accepts any order as an
+      // extension), so the spelling that comes naturally - on_data and on_error first,
+      // the optional on_connect and on_disconnect after - has to be the declared one.
       http_data_handler on_data;
       http_error_handler on_error;
+      http_connect_handler on_connect;
+      http_disconnect_handler on_disconnect;
       std::function<bool(int)> status_is_error{[](int status) { return status >= 400; }};
    };
 
@@ -1134,6 +1064,48 @@ namespace glz
       void configure_ssl_context(Func&& func)
       {
          connection_pool->configure_ssl_context(std::forward<Func>(func));
+      }
+
+      // Add the certificates in a PEM bundle file to the set of trusted CAs (thread-safe).
+      // Additive: existing trust anchors, including those loaded at construction, are kept.
+      // Example: client.add_ca_certificate_file("cacert.pem");
+      std::expected<void, std::error_code> add_ca_certificate_file(std::string_view path)
+      {
+         return connection_pool->add_ca_certificate_file(path);
+      }
+
+      // Add an OpenSSL-style hashed certificate directory to the set of trusted CAs.
+      // The directory must be indexed with c_rehash/`openssl rehash`.
+      //
+      // A bad path is not reported here: OpenSSL reads the directory lazily during the
+      // handshake, so it surfaces as a verification failure instead. Prefer
+      // add_ca_certificate_file() when you want the path validated up front.
+      //
+      // Unlike the other adders, call this before issuing any request. OpenSSL appends to
+      // the lookup list without a lock and reads that list unlocked during verification,
+      // so adding a directory while a handshake is in flight is a race inside OpenSSL that
+      // no lock on this side can close.
+      std::expected<void, std::error_code> add_ca_certificate_directory(std::string_view path)
+      {
+         return connection_pool->add_ca_certificate_directory(path);
+      }
+
+      // Add trusted CAs from an in-memory PEM bundle (thread-safe). Accepts any number of
+      // concatenated PEM certificates, so a trust bundle can be embedded in the binary
+      // instead of shipped as a file next to it.
+      // Example: client.add_ca_certificates_pem(embedded_cacert_pem);
+      std::expected<void, std::error_code> add_ca_certificates_pem(std::string_view pem)
+      {
+         return connection_pool->add_ca_certificates_pem(pem);
+      }
+
+      // Add the operating system's native trust anchors, returning how many were added
+      // (thread-safe). Windows only; returns 0 on platforms where OpenSSL's default verify
+      // paths already resolve to the system bundle. The constructor already does this, so
+      // it is only needed to restore OS trust after replacing the context's anchors.
+      std::expected<size_t, std::error_code> add_os_ca_certificates()
+      {
+         return connection_pool->add_os_ca_certificates();
       }
 
       // Configure CA trust roots with explicit/env/default fallback order.
@@ -1228,6 +1200,18 @@ namespace glz
          return perform_sync_request("PUT", *url_result, body, headers);
       }
 
+      // Synchronous PATCH request - truly synchronous, no promises/futures
+      std::expected<response, std::error_code> patch(std::string_view url, const std::string& body,
+                                                     const glz::http_headers& headers = {})
+      {
+         auto url_result = parse_url(url);
+         if (!url_result) {
+            return std::unexpected(url_result.error());
+         }
+
+         return perform_sync_request("PATCH", *url_result, body, headers);
+      }
+
       // Synchronous JSON POST request
       template <class T>
       std::expected<response, std::error_code> post_json(std::string_view url, const T& data,
@@ -1254,6 +1238,20 @@ namespace glz
          }
 
          return put(url, json_str, detail::with_json_content_type(headers));
+      }
+
+      // Synchronous JSON PATCH request
+      template <class T>
+      std::expected<response, std::error_code> patch_json(std::string_view url, const T& data,
+                                                          const glz::http_headers& headers = {})
+      {
+         std::string json_str;
+         auto ec = glz::write_json(data, json_str);
+         if (ec) {
+            return std::unexpected(std::make_error_code(std::errc::invalid_argument));
+         }
+
+         return patch(url, json_str, detail::with_json_content_type(headers));
       }
 
       [[deprecated("use stream_request_v2 instead")]]
@@ -1465,13 +1463,33 @@ namespace glz
          auto internal_on_disconnect = [this, user_on_disconnect = std::move(on_disconnect), connection, url,
                                         use_https]() {
             connection->is_connected = false;
-            // Call the user's handler if provided
+            // Settle the socket before telling the caller the stream ended, matching the
+            // non-streaming paths, which return the connection and only then run the
+            // completion handler. The other order publishes "finished" while the socket is
+            // still in hand, so a caller that starts its next request from on_disconnect
+            // finds an empty pool and dials a second connection - never reusing the very
+            // socket the code below is about to make reusable.
+            if (connection->socket) {
+               // Only a socket sitting at the end of a fully-read response can serve
+               // the next request. Pooling one that timed out, errored, or was
+               // abandoned part way through the body hands the next request a socket
+               // with the tail of this response still arriving on it, which that
+               // request reads as its own status line - the same desync a conflicting
+               // Content-Length produces, reached through the pool instead. A body
+               // framed by connection close leaves the socket at EOF, which is dead
+               // rather than dangerous, but equally unusable.
+               if (connection->response_complete.load(std::memory_order_relaxed)) {
+                  connection_pool->return_connection(url.host, url.port, use_https, std::move(*connection->socket));
+               }
+               else {
+                  detail::close_socket(*connection->socket, connection_pool->graceful_ssl_shutdown());
+               }
+            }
+            // Returning the socket leaves a null shared_ptr in the variant; every accessor
+            // guards on it, so the disconnect() that http_stream_connection runs from its
+            // destructor is a no-op rather than a dereference of a moved-from socket.
             if (user_on_disconnect) {
                user_on_disconnect();
-            }
-            // Return the connection to the pool for reuse
-            if (connection->socket) {
-               connection_pool->return_connection(url.host, url.port, use_https, std::move(*connection->socket));
             }
          };
 
@@ -1693,6 +1711,10 @@ namespace glz
                      connection->is_connected = true;
                      connection->timer->cancel();
 
+                     connection->peer_will_close.store(
+                        response_headers.response_headers.contains_token("connection", "close"),
+                        std::memory_order_relaxed);
+
                      if (on_connect) {
                         on_connect(response_headers);
                      }
@@ -1769,14 +1791,52 @@ namespace glz
                      connection->buffer->consume(bytes_transferred);
 
                      if (chunk_size == 0) {
-                        // Last chunk
-                        if (on_disconnect) on_disconnect();
+                        // Terminal chunk. The trailer section and the final CRLF still sit in
+                        // front of the next response, so the socket is only reusable once they
+                        // have been consumed too (RFC 9112 7.1).
+                        consume_trailers(connection, std::move(on_disconnect));
                         return;
                      }
 
                      read_chunk_body(connection, chunk_size, std::move(on_data), std::move(on_error),
                                      std::move(on_disconnect));
                   });
+            },
+            *connection->socket);
+      }
+
+      // After the terminal chunk, skip the optional trailer section and the final CRLF
+      // (RFC 9112 7.1.2). Only then does the socket sit at the start of whatever the
+      // server sends next, which is the one state that makes it reusable.
+      void consume_trailers(std::shared_ptr<http_stream_connection> connection, http_disconnect_handler on_disconnect)
+      {
+         std::visit(
+            [&, this](auto& sock) {
+               asio::async_read_until(*sock, *connection->buffer, "\r\n",
+                                      [this, connection, on_disconnect = std::move(on_disconnect)](
+                                         asio::error_code ec, std::size_t bytes_transferred) mutable {
+                                         // The body is already delivered in full, so a failure here is not reported
+                                         // to the caller - it only means the socket cannot be reused.
+                                         if (ec || connection->should_stop) {
+                                            if (on_disconnect) on_disconnect();
+                                            return;
+                                         }
+
+                                         const bool end_of_trailers = (bytes_transferred == 2); // just "\r\n"
+                                         connection->buffer->consume(bytes_transferred);
+
+                                         if (!end_of_trailers) {
+                                            consume_trailers(connection,
+                                                             std::move(on_disconnect)); // trailer field line
+                                            return;
+                                         }
+
+                                         // A response that asked to close is single-use however cleanly it ended.
+                                         if (!connection->peer_will_close.load(std::memory_order_relaxed)) {
+                                            connection->response_complete.store(true, std::memory_order_relaxed);
+                                         }
+                                         if (on_disconnect) on_disconnect();
+                                      });
             },
             *connection->socket);
       }

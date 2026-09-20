@@ -397,7 +397,7 @@ namespace glz
          return result;
       }();
 
-      // Flat values tuple built directly — avoids tuplet::tuple_cat (which has GCC issues)
+      // Flat values tuple built directly — avoids tuple_cat (which has GCC issues)
       static constexpr auto values = []<size_t... I>(std::index_sequence<I...>) {
          return tuple{detail::merge_accessor<V, flat_layout[I].outer, flat_layout[I].inner>{}...};
       }(std::make_index_sequence<size>{});
@@ -612,11 +612,52 @@ namespace glz
       }
    }
 
+   // Whether `meta<T>::skip` excludes the field at index I from the given operation.
+   //
+   // Consume this as `if constexpr (skipped_by_meta<...>) { ... } else { serialize/parse }`, never as
+   // an early `return` inside an `if constexpr` block. A `return` stops the field from being touched
+   // at runtime, but the code that follows it in the same block is still instantiated -- so the
+   // skipped field's serializer is compiled anyway, and a field skipped precisely because its type
+   // cannot be serialized in this context (a type with no `to`/`from`, or a non-owning view that
+   // GLZ_ASSERT_OWNS_ITS_BYTES rejects for a streaming read) still breaks the build.
+   template <class T, size_t I, operation Op>
+   inline constexpr bool skipped_by_meta = [] {
+      using V = std::remove_cvref_t<T>;
+      if constexpr (meta_has_skip<V>) {
+         return meta<V>::skip(reflect<V>::keys[I], meta_context{.op = Op});
+      }
+      else {
+         return false;
+      }
+   }();
+
+   // Whether `meta<T>::skip` excludes any field at all from the given operation.
+   //
+   // `meta::skip` is answered at compile time, so a `skip()` that never fires for an operation costs
+   // that operation nothing. Asking this rather than whether `meta<T>::skip` merely exists is what
+   // lets a read-side skip leave the writers alone.
+   template <class T, operation Op>
+   inline constexpr bool any_skipped_by_meta = [] {
+      constexpr auto N = reflect<T>::size;
+      if constexpr (meta_has_skip<T> && N > 0) {
+         return []<size_t... I>(std::index_sequence<I...>) {
+            return (skipped_by_meta<T, I, Op> || ...);
+         }(std::make_index_sequence<N>{});
+      }
+      else {
+         return false;
+      }
+   }();
+
    template <auto Opts, class T>
    inline constexpr bool maybe_skipped = [] {
       if constexpr (reflect<T>::size > 0) {
          constexpr auto N = reflect<T>::size;
-         if constexpr (meta_has_skip<T> || meta_has_skip_if<T>) {
+         // skip_if decides per value at runtime, so its mere presence forces the dynamic path. skip
+         // decides at compile time, so it only forces the dynamic path when it actually excludes a
+         // field from serialization -- a skip() that only fires on parse leaves writing on the static
+         // path, where separators and member counts are placed at compile time.
+         if constexpr (meta_has_skip_if<T> || any_skipped_by_meta<T, operation::serialize>) {
             return true;
          }
          else {
@@ -783,12 +824,9 @@ namespace glz
             }
 
             // Check if field is skipped during parse - if so, don't require it
-            if constexpr (meta_has_skip<T>) {
-               constexpr auto key = reflect<T>::keys[I];
-               if constexpr (meta<T>::skip(key, {operation::parse})) {
-                  fields[I] = false;
-                  return;
-               }
+            if constexpr (skipped_by_meta<T, I, operation::parse>) {
+               fields[I] = false;
+               return;
             }
 
             // Check if meta<T>::requires_key customization point exists
@@ -2481,7 +2519,7 @@ namespace glz
          else {
             if constexpr (N == 2) {
                if constexpr (uindex > 0) {
-                  if ((it + uindex) >= end) [[unlikely]] {
+                  if (size_t(end - it) <= uindex) [[unlikely]] {
                      return N; // error
                   }
                }
@@ -2491,7 +2529,7 @@ namespace glz
             }
             else {
                if constexpr (uindex > 0) {
-                  if ((it + uindex) >= end) [[unlikely]] {
+                  if (size_t(end - it) <= uindex) [[unlikely]] {
                      return N; // error
                   }
                }
@@ -2510,7 +2548,7 @@ namespace glz
       GLZ_ALWAYS_INLINE static constexpr size_t op(auto&& it, auto end) noexcept
       {
          if constexpr (uindex > 0) {
-            if ((it + uindex) >= end) [[unlikely]] {
+            if (size_t(end - it) <= uindex) [[unlikely]] {
                return N; // error
             }
          }
@@ -2529,7 +2567,7 @@ namespace glz
       GLZ_ALWAYS_INLINE static constexpr size_t op(auto&& it, auto end) noexcept
       {
          if constexpr (HashInfo.front_hash_bytes == 2) {
-            if ((it + 2) >= end) [[unlikely]] {
+            if (size_t(end - it) <= 2) [[unlikely]] {
                return N; // error
             }
             uint16_t h;
@@ -2548,7 +2586,7 @@ namespace glz
             return HashInfo.table[bitmix(h, HashInfo.seed) % bsize];
          }
          else if constexpr (HashInfo.front_hash_bytes == 4) {
-            if ((it + 4) >= end) [[unlikely]] {
+            if (size_t(end - it) <= 4) [[unlikely]] {
                return N;
             }
             uint32_t h;
@@ -2567,7 +2605,7 @@ namespace glz
             return HashInfo.table[bitmix(h, HashInfo.seed) % bsize];
          }
          else if constexpr (HashInfo.front_hash_bytes == 8) {
-            if ((it + 8) >= end) [[unlikely]] {
+            if (size_t(end - it) <= 8) [[unlikely]] {
                return N;
             }
             uint64_t h;
@@ -2603,7 +2641,7 @@ namespace glz
          if (c) [[likely]] {
             const auto n = uint8_t(static_cast<std::decay_t<decltype(it)>>(c) - it);
             const auto pos = per_length_info<T>.unique_index[n];
-            if ((it + pos) >= end) [[unlikely]] {
+            if (size_t(end - it) <= pos) [[unlikely]] {
                return N; // error
             }
             const auto h = bitmix(uint16_t(it[pos]) | (uint16_t(n) << 8), HashInfo.seed);
@@ -2631,7 +2669,7 @@ namespace glz
          // extra characters exist after the closing quote (e.g., standalone enum: "value")
 
          if constexpr (length_range == 0) {
-            if ((it + min_length) >= end) [[unlikely]] {
+            if (size_t(end - it) <= min_length) [[unlikely]] {
                return N;
             }
             const auto h = full_hash<HashInfo.min_length, HashInfo.max_length, HashInfo.seed>(it, min_length);
@@ -2846,7 +2884,7 @@ namespace glz
          // a gap of [min_length, max_length] would read it[255]. The wrapper's length pre-screen
          // does not catch that, so this reader keeps its own end check.
          const auto pos = per_length_info<T>.unique_index[uint8_t(n)];
-         if ((it + pos) >= end) [[unlikely]] {
+         if (size_t(end - it) <= pos) [[unlikely]] {
             return N; // error
          }
          const auto h = bitmix(uint16_t(it[pos]) | (uint16_t(n) << 8), HashInfo.seed);
