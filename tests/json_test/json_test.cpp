@@ -1176,6 +1176,26 @@ suite container_types = [] {
       expect(glz::read_json(tuple2, buffer) == glz::error_code::none);
       expect(tuple == tuple2);
    };
+   "tuple error_on_missing_array_elements"_test = [] {
+      struct opts_strict_elements : glz::opts
+      {
+         bool error_on_missing_array_elements = true;
+      };
+
+      std::tuple<int, double, std::string> t{};
+
+      // Exact match should succeed
+      expect(glz::read<opts_strict_elements{}>(t, R"([1, 2.5, "hello"])") == glz::error_code::none);
+      expect(std::get<0>(t) == 1);
+      expect(std::get<1>(t) == 2.5);
+      expect(std::get<2>(t) == "hello");
+
+      // Fewer elements should error
+      expect(glz::read<opts_strict_elements{}>(t, R"([1, 2.5])") == glz::error_code::array_element_not_found);
+
+      // Fewer elements without the option should succeed (default behavior)
+      expect(glz::read_json(t, R"([1, 2.5])") == glz::error_code::none);
+   };
    "pair roundtrip"_test = [] {
       auto pair = std::make_pair(std::string("water"), 5.2);
       decltype(pair) pair2{};
@@ -12880,6 +12900,38 @@ struct glz::meta<cast_obj>
                                         "indirect", cast<[](T& s) -> auto& { return s.integer; }, double>);
 };
 
+struct glaze_value_nullable_field
+{
+   std::optional<int> my_val;
+   struct glaze
+   {
+      static constexpr auto value{&glaze_value_nullable_field::my_val};
+   };
+};
+
+struct glaze_value_nullable_obj
+{
+   glaze_value_nullable_field field_name{};
+   std::string required_field{};
+};
+
+struct glaze_value_ptr_field
+{
+   std::unique_ptr<int> ptr;
+   struct glaze
+   {
+      static constexpr auto value{&glaze_value_ptr_field::ptr};
+   };
+};
+
+struct glaze_value_nullable_multi_obj
+{
+   glaze_value_nullable_field a{};
+   glaze_value_ptr_field b{};
+   std::string c{};
+   glaze_value_nullable_field d{};
+};
+
 struct cast_nullable_obj
 {
    std::optional<double> a;
@@ -12940,6 +12992,110 @@ suite cast_tests = [] {
 
       // Test missing required field
       data = R"({"a":null})";
+      ec = glz::read<opts>(obj, data);
+      expect(ec == glz::error_code::missing_key);
+   };
+
+   "glaze_value_t nullable skip_null_members write"_test = [] {
+      // When skip_null_members is enabled (default), writing a glaze_value_t
+      // wrapping a nullable type should skip the field when the inner value is null
+      glaze_value_nullable_obj obj{};
+      obj.required_field = "hello";
+      // field_name.my_val is std::nullopt by default
+
+      auto result = glz::write_json(obj);
+      expect(result.has_value());
+      expect(result.value() == R"({"required_field":"hello"})") << result.value();
+
+      // With value present, the field should be written
+      obj.field_name.my_val = 42;
+      result = glz::write_json(obj);
+      expect(result.has_value());
+      expect(result.value() == R"({"field_name":42,"required_field":"hello"})") << result.value();
+   };
+
+   "glaze_value_t nullable unique_ptr inner type"_test = [] {
+      glaze_value_nullable_multi_obj obj{};
+      obj.c = "hello";
+      // a (optional) and b (unique_ptr) and d (optional) are all null
+
+      auto result = glz::write_json(obj);
+      expect(result.has_value());
+      expect(result.value() == R"({"c":"hello"})") << result.value();
+
+      // Set only the unique_ptr field
+      obj.b.ptr = std::make_unique<int>(99);
+      result = glz::write_json(obj);
+      expect(result.has_value());
+      expect(result.value() == R"({"b":99,"c":"hello"})") << result.value();
+
+      // Set all fields
+      obj.a.my_val = 1;
+      obj.d.my_val = 4;
+      result = glz::write_json(obj);
+      expect(result.has_value());
+      expect(result.value() == R"({"a":1,"b":99,"c":"hello","d":4})") << result.value();
+   };
+
+   "glaze_value_t nullable skip_null_members false"_test = [] {
+      constexpr auto opts = glz::opts{.format = glz::JSON, .skip_null_members = false};
+
+      glaze_value_nullable_obj obj{};
+      obj.required_field = "hello";
+
+      auto result = glz::write<opts>(obj);
+      expect(result.has_value());
+      expect(result.value() == R"({"field_name":null,"required_field":"hello"})") << result.value();
+   };
+
+   "glaze_value_t nullable write then read round-trip"_test = [] {
+      // Round-trip with null field: field is skipped, reading into default object preserves nullopt
+      glaze_value_nullable_obj obj{};
+      obj.required_field = "hello";
+
+      auto json = glz::write_json(obj);
+      expect(json.has_value());
+
+      glaze_value_nullable_obj obj2{};
+      auto ec = glz::read_json(obj2, json.value());
+      expect(!ec) << glz::format_error(ec, json.value());
+      expect(!obj2.field_name.my_val.has_value());
+      expect(obj2.required_field == "hello");
+
+      // Round-trip with value present
+      obj.field_name.my_val = 42;
+      json = glz::write_json(obj);
+      expect(json.has_value());
+
+      ec = glz::read_json(obj2, json.value());
+      expect(!ec) << glz::format_error(ec, json.value());
+      expect(obj2.field_name.my_val.has_value());
+      expect(obj2.field_name.my_val.value() == 42);
+   };
+
+   "glaze_value_t nullable with error_on_missing_keys"_test = [] {
+      constexpr auto opts = glz::opts{
+         .format = glz::JSON,
+         .error_on_missing_keys = true,
+      };
+
+      // Missing nullable value-type field should not error
+      std::string_view data = R"({"required_field":"hello"})";
+      glaze_value_nullable_obj obj{};
+      auto ec = glz::read<opts>(obj, data);
+      expect(!ec) << glz::format_error(ec, data);
+      expect(!obj.field_name.my_val.has_value());
+      expect(obj.required_field == "hello");
+
+      // With value present
+      data = R"({"field_name":42,"required_field":"world"})";
+      ec = glz::read<opts>(obj, data);
+      expect(!ec) << glz::format_error(ec, data);
+      expect(obj.field_name.my_val.has_value());
+      expect(obj.field_name.my_val.value() == 42);
+
+      // Missing required (non-nullable) field should still error
+      data = R"({"field_name":42})";
       ec = glz::read<opts>(obj, data);
       expect(ec == glz::error_code::missing_key);
    };

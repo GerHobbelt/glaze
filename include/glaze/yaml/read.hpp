@@ -3712,6 +3712,9 @@ namespace glz
                   return;
 
                if (it != end && *it == ']') {
+                  if constexpr (check_error_on_missing_array_elements(Opts)) {
+                     ctx.error = error_code::array_element_not_found;
+                  }
                   return; // Early termination
                }
 
@@ -4686,8 +4689,8 @@ namespace glz
    consteval auto yaml_variant_is_auto_deducible()
    {
       using counts = yaml_variant_type_count<T>;
-      return counts::n_bool < 2 && counts::n_num < 2 && counts::n_str < 2 && counts::n_object < 2 &&
-             counts::n_array < 2 && counts::n_null < 2;
+      return counts::n_bool < 2 && counts::n_str < 2 && counts::n_object < 2 && counts::n_array < 2 &&
+             counts::n_null < 2;
    }
 
    // Process YAML variant alternatives by iterating directly over variant indices

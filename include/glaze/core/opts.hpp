@@ -166,6 +166,10 @@ namespace glz
    // Shrinks dynamic containers to new size to save memory
 
    // ---
+   // bool error_on_missing_array_elements = false;
+   // Require arrays to have all elements expected by the target type (tuples, glaze_array_t, tuple_t)
+
+   // ---
    // bool error_on_const_read = false;
    // Error if attempt is made to read into a const value, by default the value is skipped without error
 
@@ -287,6 +291,13 @@ namespace glz
    // Can be combined with 'raw' to write completely unprocessed string content.
 
    // ---
+   // bool aligned_arrays = false;
+   // When true, BEVE typed arrays for numeric types use alignment padding so that the data payload
+   // begins at a memory offset that is a multiple of the element size. This enables zero-copy
+   // access via std::span<T> directly into the message buffer, eliminating copy and allocation overhead.
+   // Only applies to BEVE format. The alignment padding is deterministic and does not need to be stored.
+
+   // ---
    // bool structs_as_arrays = false;
    // Serialize/deserialize structs as arrays without field keys.
    // Useful for binary formats or when field names add unnecessary overhead.
@@ -361,6 +372,16 @@ namespace glz
    {
       if constexpr (requires { Opts.append_arrays; }) {
          return Opts.append_arrays;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval bool check_error_on_missing_array_elements(auto&& Opts)
+   {
+      if constexpr (requires { Opts.error_on_missing_array_elements; }) {
+         return Opts.error_on_missing_array_elements;
       }
       else {
          return false;
@@ -755,6 +776,16 @@ namespace glz
    {
       if constexpr (requires { Opts.qualified_type_names; }) {
          return Opts.qualified_type_names;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval bool check_aligned_arrays(auto&& Opts)
+   {
+      if constexpr (requires { Opts.aligned_arrays; }) {
+         return Opts.aligned_arrays;
       }
       else {
          return false;
@@ -1424,6 +1455,17 @@ namespace glz
    template <uint32_t Format>
    struct serialize
    {};
+
+   // Default context type for a format.
+   // Formats that need a richer context (e.g. YAML) specialize this.
+   template <uint32_t Format>
+   struct format_context
+   {
+      using type = context;
+   };
+
+   template <uint32_t Format>
+   using format_context_t = typename format_context<Format>::type;
 
    template <uint32_t Format>
    struct serialize_partial
