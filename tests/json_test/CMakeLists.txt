@@ -3,6 +3,20 @@ project(json_test)
 set(JSON_TEST_SOURCES json_test.cpp)
 set(JSON_VARIANT_SUPPORT_SOURCES json_variant_support_test.cpp)
 
+# These tests write and read scratch files/directories using relative paths
+# (e.g. "./dir", "./start.jsonc", "../file.json"). ctest runs the targets in
+# parallel, so without isolation the identical json_test / json_test_non_null
+# binaries would race on the same files in a shared working directory and fail
+# intermittently. Give each test its own working directory nested one level
+# deep so that both "./" and "../" relative paths resolve to a per-target
+# location. The directory is created at configure time so it exists before the
+# test runs.
+function(glz_add_isolated_test target)
+    set(work_dir ${CMAKE_CURRENT_BINARY_DIR}/${target}.workdir/cwd)
+    file(MAKE_DIRECTORY ${work_dir})
+    add_test(NAME ${target} COMMAND ${target} WORKING_DIRECTORY ${work_dir})
+endfunction()
+
 function(add_glz_json_test target)
     add_executable(${target} ${ARGN})
     target_link_libraries(${target} PRIVATE glz_test_common)
@@ -11,7 +25,7 @@ function(add_glz_json_test target)
         target_compile_options(${target} PRIVATE "-Wa,-mbig-obj")
     endif ()
 
-    add_test(NAME ${target} COMMAND ${target})
+    glz_add_isolated_test(${target})
 
     target_code_coverage(${target} AUTO ALL)
 
@@ -24,7 +38,7 @@ function(add_glz_json_test target)
         target_compile_options(${non_null_target} PRIVATE "-Wa,-mbig-obj")
     endif ()
 
-    add_test(NAME ${non_null_target} COMMAND ${non_null_target})
+    glz_add_isolated_test(${non_null_target})
 endfunction()
 
 add_glz_json_test(${PROJECT_NAME} ${JSON_TEST_SOURCES})
@@ -119,6 +133,14 @@ add_executable(u8string_test u8string_test.cpp)
 target_link_libraries(u8string_test PRIVATE glz_test_common)
 
 add_test(NAME u8string_test COMMAND u8string_test)
+
+## UTF-8 validation test - exercises whichever SIMD backend the build selected
+
+add_executable(utf8_validation_test utf8_validation_test.cpp)
+
+target_link_libraries(utf8_validation_test PRIVATE glz_test_common)
+
+add_test(NAME utf8_validation_test COMMAND utf8_validation_test)
 
 ## JSON Patch test - RFC 6902
 

@@ -699,6 +699,43 @@ suite json_stream_reader_tests = [] {
       expect(records.size() == 3u);
    };
 
+   // A stream whose last record is cut off used to come back as a success holding only the records
+   // that survived. read_json_stream stops on end_reached and treats it as end of stream, so a tail
+   // that ran out mid-record was indistinguishable from a stream that ended between records, and
+   // the caller was handed a short vector with nothing to say it was short.
+   "a truncated final record is reported, not dropped"_test = [] {
+      for (std::string_view tail : {R"({"id":2)", R"({"id":2,"name":"b")", R"({"id":2,"name":)"}) {
+         std::istringstream iss{R"({"id":1,"name":"a"})"
+                                "\n" +
+                                std::string{tail}};
+
+         std::vector<Record> records;
+         const auto ec = glz::read_json_stream(records, iss);
+
+         expect(ec.ec == glz::error_code::unexpected_end) << tail;
+         expect(ec.ec != glz::error_code::end_reached) << tail;
+         expect(records.size() == 1u) << tail;
+      }
+   };
+
+   "a stream ending between records still succeeds"_test = [] {
+      for (std::string_view text : {R"({"id":1,"name":"a"})"
+                                    "\n"
+                                    R"({"id":2,"name":"b"})",
+                                    R"({"id":1,"name":"a"})"
+                                    "\n"
+                                    R"({"id":2,"name":"b"})"
+                                    "\n"}) {
+         std::istringstream iss{std::string{text}};
+
+         std::vector<Record> records;
+         const auto ec = glz::read_json_stream(records, iss);
+
+         expect(!ec) << text;
+         expect(records.size() == 2u) << text;
+      }
+   };
+
    "json_stream_reader error handling"_test = [] {
       std::istringstream iss(R"({"id":1,"name":"valid"}
 {"id":invalid})");
@@ -4078,6 +4115,277 @@ suite additional_edge_cases = [] {
       expect(!ec);
       expect(r.id == 42);
       expect(r.name == "test");
+   };
+
+   // A stream is read without a terminator, so running out of input while looking for a value
+   // reports the same end_reached a value ending with the buffer does. A stream that never held a
+   // value has to be rejected the way an empty one is, rather than reporting success over an
+   // untouched destination.
+   "stream holding no value"_test = [] {
+      for (std::string_view blank : {" ", "   ", "\t\n\r "}) {
+         std::istringstream iss{std::string{blank}};
+         glz::istream_buffer<> buffer(iss);
+
+         int i{42};
+         expect(glz::read_json(i, buffer) == glz::error_code::no_read_input) << blank;
+         expect(i == 42) << "destination must be left alone";
+      }
+
+      // read_streaming directly: read_jsonc has no streaming overload, so it would take the
+      // buffered path and never reach the code under test.
+      for (std::string_view commented : {"// hi\n", " /* block */ "}) {
+         std::istringstream iss{std::string{commented}};
+         glz::istream_buffer<> buffer(iss);
+
+         int i{42};
+         expect(glz::read_streaming<glz::opts{.comments = true}>(i, buffer) == glz::error_code::no_read_input)
+            << commented;
+         expect(i == 42) << "destination must be left alone";
+      }
+   };
+
+   // Nothing refills while the top level skips leading whitespace, so whitespace wider than the
+   // window stops the parse short of a value that is really there. Only an exhausted stream can be
+   // said to have held no value, so this case must not be reported as one. The read is left as it
+   // has always been -- the destination is untouched and no error is raised -- which is a known
+   // limitation of streaming rather than something this test endorses. It is pinned so that a
+   // change to either half is deliberate.
+   "leading whitespace wider than the window is not an absent value"_test = [] {
+      std::istringstream iss{std::string(600, ' ') + "7"};
+      glz::basic_istream_buffer<std::istringstream, 512> buffer(iss);
+
+      int i{42};
+      expect(glz::read_streaming<glz::opts{}>(i, buffer) != glz::error_code::no_read_input)
+         << "the stream has input; it is the window that ran out";
+      expect(i == 42) << "the value is past the window and is not reached";
+   };
+
+   // The absent-value check looks at the window the parse ended in. A read that refilled consumed
+   // its value in an earlier window, so the check must not mistake a short final span for one.
+   "value read across refills is not mistaken for an absent value"_test = [] {
+      std::string json = "[";
+      for (int i = 0; i < 400; ++i) {
+         if (i) json += ',';
+         json += std::to_string(i);
+      }
+      json += "]";
+      json += std::string(600, ' '); // trailing whitespace outlasting the window
+
+      std::istringstream iss{json};
+      glz::basic_istream_buffer<std::istringstream, 512> buffer(iss); // forces many refills
+
+      std::vector<int> v{};
+      expect(!glz::read_json(v, buffer));
+      expect(v.size() == 400u);
+      expect(v[399] == 399);
+   };
+
+   // A stream that ends with containers still open is truncated input. end_reached is documented as
+   // a non-error code, so surfacing it here would tell the caller the read succeeded and merely
+   // stopped early -- exactly the wrong reading of a stream that was cut off.
+   "a truncated stream reports unexpected_end"_test = [] {
+      for (std::string_view truncated : {"[1,2", "[[1,2],[3", "{\"a\":1", "[{\"a\":1}"}) {
+         std::istringstream iss{std::string{truncated}};
+         glz::istream_buffer<> buffer(iss);
+
+         glz::generic j{};
+         const auto ec = glz::read_json(j, buffer);
+         expect(ec == glz::error_code::unexpected_end) << truncated;
+         expect(ec != glz::error_code::end_reached) << truncated;
+      }
+   };
+
+   // The same input, but long enough that the reader refills its way through several windows before
+   // the source runs dry. The truncation is then many windows away from where the parse started,
+   // which is the case a check written against the first window would miss.
+   "a truncation found after refills reports unexpected_end"_test = [] {
+      std::string json = "[";
+      for (int i = 0; i < 400; ++i) {
+         if (i) json += ',';
+         json += std::to_string(i);
+      }
+      // no closing bracket
+
+      std::istringstream iss{json};
+      glz::basic_istream_buffer<std::istringstream, 512> buffer(iss);
+
+      std::vector<int> v{};
+      const auto ec = glz::read_json(v, buffer);
+      expect(ec == glz::error_code::unexpected_end);
+      expect(ec != glz::error_code::end_reached);
+   };
+};
+
+// A streaming buffer satisfies `contiguous`, so before these entry points routed to read_streaming
+// they bound to the buffered read: one window, parsed with null_terminated on, read past its end.
+// Only read_json carried its own streaming overload; everything funnelling through `read` did not.
+// A document larger than the window is what makes the difference visible -- it both overruns the
+// window and, once routed correctly, needs the refills to complete.
+namespace
+{
+   std::string oversized_array()
+   {
+      std::string json = "[";
+      for (int i = 0; i < 400; ++i) {
+         if (i) json += ',';
+         json += std::to_string(i);
+      }
+      return json + "]";
+   }
+
+   constexpr size_t narrow_window = 512; // smaller than oversized_array()
+}
+
+suite streaming_buffer_dispatch_tests = [] {
+   "read_jsonc streams instead of parsing one window"_test = [] {
+      std::istringstream iss{oversized_array()};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      expect(!glz::read_jsonc(v, buffer));
+      expect(v.size() == 400u);
+      expect(v[399] == 399);
+   };
+
+   "generic read streams instead of parsing one window"_test = [] {
+      std::istringstream iss{oversized_array()};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      expect(!glz::read<glz::opts{}>(v, buffer));
+      expect(v.size() == 400u);
+   };
+
+   // The context-taking overload has nowhere to put the streaming state, so it runs on one that
+   // does. The caller's context must still come back carrying the outcome.
+   "generic read with a caller supplied context"_test = [] {
+      std::istringstream iss{oversized_array()};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      glz::context ctx{};
+      expect(!glz::read<glz::opts{}>(v, buffer, ctx));
+      expect(v.size() == 400u);
+      expect(ctx.error == glz::error_code::none);
+   };
+
+   "caller supplied context reports the error"_test = [] {
+      std::istringstream iss{R"([1,2,)"};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      glz::context ctx{};
+      expect(glz::read<glz::opts{}>(v, buffer, ctx)) << "truncated input must fail";
+      expect(ctx.error != glz::error_code::none) << "the caller's context must carry the error";
+   };
+
+   // read_json already had streaming overloads; nothing here may disturb them.
+   "read_json is unchanged"_test = [] {
+      std::istringstream iss{oversized_array()};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      expect(!glz::read_json(v, buffer));
+      expect(v.size() == 400u);
+   };
+};
+
+// Routing every format to read_streaming only removes the overrun; it does not give a reader
+// refill points it never had. JSON is the only reader that has them, so for the rest a document
+// longer than the window used to end in an answer that blamed the document: NDJSON reported
+// success carrying the elements that fit, BEVE reported unexpected_end. Both now say which it was.
+suite non_streaming_format_reporting = [] {
+   static_assert(glz::format_supports_streaming<glz::JSON>);
+   static_assert(!glz::format_supports_streaming<glz::NDJSON>,
+                 "NDJSON's line loop cannot refill between lines, whatever its per-line values do");
+   static_assert(!glz::format_supports_streaming<glz::BEVE>);
+
+   "NDJSON larger than the window does not silently truncate"_test = [] {
+      std::vector<int> src{};
+      for (int i = 0; i < 400; ++i) src.push_back(i);
+      std::string doc{};
+      expect(!glz::write_ndjson(src, doc));
+      expect(doc.size() > narrow_window) << "the document has to outrun the window to test anything";
+
+      std::istringstream iss{doc};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      const auto ec = glz::read_streaming<glz::opts{.format = glz::NDJSON}>(v, buffer);
+      expect(ec == glz::error_code::streaming_unsupported) << "a short read must be reported, not returned as success";
+   };
+
+   "BEVE larger than the window names the window"_test = [] {
+      std::vector<int> src{};
+      for (int i = 0; i < 400; ++i) src.push_back(i);
+      std::string doc{};
+      expect(!glz::write_beve(src, doc));
+      expect(doc.size() > narrow_window);
+
+      std::istringstream iss{doc};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      const auto ec = glz::read_streaming<glz::opts{.format = glz::BEVE}>(v, buffer);
+      expect(ec == glz::error_code::streaming_unsupported)
+         << "unexpected_end would blame the document for a window that was too small";
+   };
+
+   // The three ways a non-streaming read is legitimate. Each one must keep its own answer, because
+   // the check keys on whether the source was exhausted rather than on whether the window was.
+   "a document that fits still reads"_test = [] {
+      std::vector<int> src{1, 2, 3, 4, 5};
+      std::string doc{};
+      expect(!glz::write_beve(src, doc));
+      expect(doc.size() < narrow_window);
+
+      std::istringstream iss{doc};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      expect(!glz::read_streaming<glz::opts{.format = glz::BEVE}>(v, buffer));
+      expect(v.size() == 5u);
+   };
+
+   "a value followed by trailing bytes is not a short read"_test = [] {
+      std::vector<int> src{1, 2, 3, 4, 5};
+      std::string doc{};
+      expect(!glz::write_beve(src, doc));
+      const std::string two = doc + doc; // second document left unread in the same window
+      expect(two.size() < narrow_window);
+
+      std::istringstream iss{two};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      expect(!glz::read_streaming<glz::opts{.format = glz::BEVE}>(v, buffer))
+         << "the window is undrained but the source is exhausted, so the read saw everything it needed";
+      expect(v.size() == 5u);
+   };
+
+   "genuinely malformed input keeps its own error"_test = [] {
+      std::vector<int> src{1, 2, 3, 4, 5};
+      std::string doc{};
+      expect(!glz::write_beve(src, doc));
+      const std::string truncated = doc.substr(0, doc.size() - 3);
+
+      std::istringstream iss{truncated};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      const auto ec = glz::read_streaming<glz::opts{.format = glz::BEVE}>(v, buffer);
+      expect(ec == glz::error_code::unexpected_end)
+         << "the whole source fit in the window, so the document really is truncated";
+   };
+
+   // The trait is what exempts JSON, so pin that the exemption is live.
+   "JSON larger than the window still streams to completion"_test = [] {
+      std::istringstream iss{oversized_array()};
+      glz::basic_istream_buffer<std::istringstream, narrow_window> buffer(iss);
+
+      std::vector<int> v{};
+      expect(!glz::read_streaming<glz::opts{}>(v, buffer));
+      expect(v.size() == 400u);
    };
 };
 

@@ -5,7 +5,10 @@
 
 #include <cctype>
 #include <charconv>
+#include <concepts>
+#include <string>
 
+#include "glaze/core/chrono.hpp"
 #include "glaze/core/common.hpp"
 #include "glaze/core/read.hpp"
 #include "glaze/core/reflect.hpp"
@@ -1703,10 +1706,27 @@ namespace glz
          return true;
       }
 
+      // A YAML scalar cannot generally be viewed in place in the input buffer: a
+      // double-quoted scalar may carry escapes, a plain scalar may fold across lines, and a
+      // block scalar joins them. The reader therefore decodes into an owning buffer and
+      // hands that buffer to the target, so the target must be able to take ownership of it.
+      //
+      // This is deliberately narrower than str_t. A std::string_view is assignable from the
+      // decoded buffer, so without this constraint it compiled and then pointed at freed
+      // memory once the buffer died. A std::array<char, N> is not assignable at all, so it
+      // reported as supported and then failed to compile deep inside the reader. Both are
+      // now reported unsupported by read_supported<T, YAML>, which is the honest answer.
+      //
+      // Writing is unaffected: a non-owning string is a perfectly good source, so
+      // write_supported<std::string_view, YAML> remains true.
+      template <class T>
+      concept owning_scalar_target = not string_view_t<T> && std::assignable_from<std::decay_t<T>&, std::string&&>;
+
    } // namespace yaml
 
    // String types
    template <str_t T>
+      requires(yaml::owning_scalar_target<T>)
    struct from<YAML, T>
    {
       template <auto Opts, class It>
@@ -1760,6 +1780,68 @@ namespace glz
             value = std::move(str);
             yaml::finalize_node_anchor(preamble.node_props, ctx, it);
          }
+      }
+   };
+
+   // ============================================
+   // std::chrono calendar types
+   // ============================================
+   //
+   // Parsed from an ISO 8601 scalar using the shared chrono_detail parsers. Reading goes
+   // through the str_t reader above, so every YAML scalar style is accepted regardless of
+   // which one the writer emits: plain (what Glaze writes), single-quoted, double-quoted
+   // and block. That keeps hand-written and third-party YAML readable, since many
+   // generators quote timestamps.
+   //
+   // std::string rather than std::string_view is deliberate: YAML scalars can require
+   // unescaping and line folding, so the reader materializes them into an owning buffer.
+
+   // system_clock::time_point: parse from ISO 8601.
+   // Time points whose period is exactly `days` (e.g. std::chrono::sys_days) also accept
+   // the bare "YYYY-MM-DD" form; full datetimes remain accepted and are floored to days.
+   // Coarser periods fall through to the full parser so dates are not silently snapped to
+   // a multi-day boundary.
+   template <is_system_time_point T>
+      requires(not custom_read<T>)
+   struct from<YAML, T>
+   {
+      template <auto Opts, class It>
+      static void op(auto&& value, is_context auto&& ctx, It&& it, auto end) noexcept
+      {
+         std::string str;
+         from<YAML, std::string>::template op<Opts>(str, ctx, it, end);
+         if (bool(ctx.error)) [[unlikely]]
+            return;
+
+         using Duration = typename std::remove_cvref_t<T>::duration;
+         using Period = typename Duration::period;
+         if constexpr (std::ratio_equal_v<Period, std::ratio<86400>>) {
+            if (str.size() == 10) {
+               std::chrono::year_month_day ymd{};
+               chrono_detail::parse_ymd(str, ymd, ctx.error);
+               if (bool(ctx.error)) [[unlikely]]
+                  return;
+               value = std::chrono::time_point_cast<Duration>(std::chrono::sys_days{ymd});
+               return;
+            }
+         }
+         chrono_detail::parse_iso8601(str, value, ctx.error);
+      }
+   };
+
+   // year_month_day: parse from "YYYY-MM-DD"
+   template <is_year_month_day T>
+      requires(not custom_read<T>)
+   struct from<YAML, T>
+   {
+      template <auto Opts, class It>
+      static void op(auto&& value, is_context auto&& ctx, It&& it, auto end) noexcept
+      {
+         std::string str;
+         from<YAML, std::string>::template op<Opts>(str, ctx, it, end);
+         if (bool(ctx.error)) [[unlikely]]
+            return;
+         chrono_detail::parse_ymd(str, value, ctx.error);
       }
    };
 
@@ -2254,6 +2336,27 @@ namespace glz
 
    namespace yaml
    {
+      // Reading a YAML sequence node into a container OVERWRITES its previous
+      // contents rather than appending to them, matching the JSON parser
+      // (see json/read.hpp). Growable containers are cleared up front so that
+      // pre-existing elements do not leak into the parsed result; fixed-size
+      // containers (e.g. std::array) are overwritten element-by-element and are
+      // intentionally left untouched here.
+      template <auto Opts, class V>
+      inline void clear_sequence_before_read(V& value)
+      {
+         if constexpr (emplace_backable<V> && requires { value.clear(); }) {
+            // vector-like: honor the append_arrays option, matching json/read.hpp
+            if constexpr (!check_append_arrays(Opts)) {
+               value.clear();
+            }
+         }
+         else if constexpr (emplaceable<V> && requires { value.clear(); }) {
+            // set-like: json/read.hpp clears unconditionally; append_arrays does not apply
+            value.clear();
+         }
+      }
+
       // Parse flow sequence [item, item, ...]
       template <auto Opts, class T, class Ctx, class It, class End>
       inline void parse_flow_sequence(T&& value, Ctx& ctx, It& it, End end)
@@ -2293,6 +2396,10 @@ namespace glz
             ctx.error = error_code::syntax_error;
             return;
          }
+
+         // Overwrite (do not append to) any pre-existing contents. Must happen
+         // before the empty-array early return below so that `[]` also clears.
+         clear_sequence_before_read<Opts>(value);
 
          ++it; // Skip '['
          // Skip whitespace and newlines after opening bracket (YAML allows multi-line flow sequences)
@@ -2764,6 +2871,11 @@ namespace glz
                }
             }
          };
+
+         // Overwrite (do not append to) any pre-existing contents. A block
+         // sequence is only entered once a '-' item is confirmed, so clearing
+         // up front correctly (re)assigns the container to the parsed sequence.
+         clear_sequence_before_read<Opts>(value);
 
          sequence_container_adapter adapter{};
 
@@ -4122,6 +4234,35 @@ namespace glz
          using key_t = typename std::remove_cvref_t<T>::key_type;
          using val_t = typename std::remove_cvref_t<T>::mapped_type;
 
+         // Reading a YAML mapping MERGES into the target: an entry overwrites the
+         // value of a key that existed before the read and adds new keys, while
+         // pre-existing keys the document does not mention are preserved (like a
+         // struct/object read, and like json/read.hpp's per-key value[key]).
+         // Within a single document a repeated key keeps its FIRST value -- YAML
+         // mappings disallow duplicate keys and the conformance suite expects
+         // first-wins, which falls out of emplace into an empty map. Any
+         // pre-existing entry the document leaves untouched is restored on scope
+         // exit (including error paths). When the target starts empty (the common
+         // case) this is a no-op with negligible cost.
+         std::remove_cvref_t<T> preexisting_entries;
+         if (!value.empty()) {
+            preexisting_entries = std::move(value);
+            value.clear();
+         }
+         struct merge_restore_guard
+         {
+            std::remove_cvref_t<T>& target;
+            std::remove_cvref_t<T>& saved;
+            ~merge_restore_guard()
+            {
+               // emplace is a no-op for keys the document already wrote, so only
+               // untouched pre-existing entries are put back.
+               for (auto& entry : saved) {
+                  target.emplace(entry.first, std::move(entry.second));
+               }
+            }
+         } merge_restore{value, preexisting_entries};
+
          const bool treat_as_block_mapping =
             !yaml::check_flow_context(Opts) && *it == '{' && yaml::inline_value_has_plain_mapping_indicator(it, end);
 
@@ -5209,6 +5350,12 @@ namespace glz
       template <auto Opts, class It>
       static void op(auto&& value, is_context auto&& ctx, It&& it, auto end) noexcept
       {
+         // Inside op() rather than at class scope: read_supported is `requires { from<Format, T>{}; }`,
+         // so a class-scope assert turns that feature probe into a hard error instead of `false`.
+         static_assert(content_v<std::remove_cvref_t<T>>.empty(),
+                       "Adjacent variant tagging (glz::meta `content`) is implemented for JSON and "
+                       "BEVE but not yet for YAML. Reading this variant as YAML would silently expect "
+                       "the internally tagged shape, so it is rejected here instead.");
          if (bool(ctx.error)) [[unlikely]]
             return;
 
@@ -5504,7 +5651,7 @@ namespace glz
 
                // Anchor on alias (&anchor *alias) is invalid per YAML spec.
                // But alias-as-key (&anchor *alias : value) is valid.
-               if (*it == '*' && !yaml::alias_token_is_mapping_key(it, end)) {
+               if (it != end && *it == '*' && !yaml::alias_token_is_mapping_key(it, end)) {
                   ctx.error = error_code::syntax_error;
                   return;
                }
@@ -6155,17 +6302,24 @@ namespace glz
       return read<set_yaml<Opts>()>(std::forward<T>(value), std::forward<Buffer>(buffer), ctx);
    }
 
-   template <auto Opts = yaml::yaml_opts{}, class T>
-   [[nodiscard]] error_ctx read_file_yaml(T&& value, const sv file_path) noexcept
+   template <auto Opts = yaml::yaml_opts{}, class T, is_buffer Buffer>
+   [[nodiscard]] error_ctx read_file_yaml(T&& value, const sv file_path, Buffer&& buffer) noexcept
    {
-      std::string buffer;
-      const auto ec = file_to_buffer(buffer, file_path);
+      yaml::yaml_context ctx{};
+      ctx.current_file = file_path;
+      const auto ec = file_to_buffer(buffer, ctx.current_file);
+
       if (bool(ec)) {
          return {0, ec};
       }
 
-      yaml::yaml_context ctx{};
       return read<set_yaml<Opts>()>(std::forward<T>(value), buffer, ctx);
+   }
+
+   template <auto Opts = yaml::yaml_opts{}, class T>
+   [[nodiscard]] error_ctx read_file_yaml(T&& value, const sv file_path) noexcept
+   {
+      return read_file_yaml<Opts>(value, file_path, std::string{});
    }
 
 } // namespace glz

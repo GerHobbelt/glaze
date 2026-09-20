@@ -1130,6 +1130,33 @@ suite converter_tests = [] {
       expect(j.value() == "255");
    };
 
+   "jsonb_to_json INT5 hex sign-bit magnitudes"_test = [] {
+      auto convert = [](const std::string& payload) {
+         std::string buf;
+         buf.push_back(static_cast<char>((12u << 4) | 4u)); // INT5, u8_follows
+         buf.push_back(static_cast<char>(payload.size()));
+         buf += payload;
+         return glz::jsonb_to_json(buf);
+      };
+
+      // "-0x8000000000000000" is exactly int64 min; negating the signed magnitude was UB.
+      auto j = convert("-0x8000000000000000");
+      expect(j.has_value());
+      expect(j.value() == "-9223372036854775808");
+
+      // Positive magnitudes with the sign bit set used to wrap to a negative int.
+      j = convert("0x8000000000000000");
+      expect(j.has_value());
+      expect(j.value() == "9223372036854775808");
+
+      j = convert("0xFFFFFFFFFFFFFFFF");
+      expect(j.has_value());
+      expect(j.value() == "18446744073709551615");
+
+      // A negative magnitude past int64 min has no representation and is rejected.
+      expect(!convert("-0x8000000000000001").has_value());
+   };
+
    "jsonb_to_json maps NaN to null and infinities to 9e999"_test = [] {
       std::string buf;
       expect(not glz::write_jsonb(std::numeric_limits<double>::quiet_NaN(), buf));
@@ -2395,5 +2422,40 @@ suite exception_api_tests = [] {
    };
 };
 #endif
+
+// A variant whose `ids` array is shorter than its alternative list. That is a supported read-side
+// feature -- the first unlabeled alternative is the default for an unrecognized id -- so it is
+// reachable from a legal glz::meta. Writing the unlabeled alternative has no id to emit; indexing
+// ids_v there read past the end of a static array and emitted the adjacent static data as the tag
+// value (~4 GB read under ASan). The writer must report an error instead.
+namespace short_ids_guard
+{
+   struct labeled
+   {
+      int a{};
+   };
+   struct unlabeled
+   {
+      int b{};
+   };
+   using v_t = std::variant<labeled, unlabeled>;
+}
+
+template <>
+struct glz::meta<short_ids_guard::v_t>
+{
+   static constexpr std::string_view tag = "t";
+   static constexpr std::array<std::string_view, 1> ids{"a"}; // 1 id, 2 alternatives
+};
+
+suite short_ids_write_guard = [] {
+   "writing an alternative with no declared id errors instead of reading out of bounds"_test = [] {
+      using namespace short_ids_guard;
+      std::string buffer{};
+      expect(bool(glz::write_jsonb(v_t{unlabeled{7}}, buffer)));
+      buffer.clear();
+      expect(not glz::write_jsonb(v_t{labeled{3}}, buffer)); // the labeled alternative is unaffected
+   };
+};
 
 int main() { return 0; }

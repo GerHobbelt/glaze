@@ -29,7 +29,16 @@ namespace glz
 
    namespace detail
    {
-      // Skip a BEVE value and return the new position (no context needed for position tracking)
+      // Skip a BEVE value and return the new position (no context needed for position tracking).
+      //
+      // A failed skip leaves `it` part way through the value, and every caller here treats the
+      // returned pointer as the start of the next one, so handing that position back would resolve
+      // later lookups against the middle of a value. Return `end` instead: the caller's scan stops
+      // and reports nothing found rather than something wrong. Nesting deeper than
+      // max_recursive_depth_limit is the reachable case -- skip_value<BEVE> refuses it, which is what
+      // keeps this from being a stack overflow -- so a lazy view over such a value can no longer
+      // reach the members past it. Distinguishing "too deep" from "absent" needs an error channel
+      // through the lazy API, which these accessors do not have.
       template <opts Opts>
       GLZ_ALWAYS_INLINE const char* skip_value_beve_lazy(const char* p, const char* end) noexcept
       {
@@ -38,6 +47,9 @@ namespace glz
          context ctx{};
          auto it = p;
          skip_value<BEVE>::op<Opts>(ctx, it, end);
+         if (bool(ctx.error)) [[unlikely]] {
+            return end;
+         }
          return it;
       }
 
@@ -738,6 +750,9 @@ namespace glz
          const char* counter = p;
          while (counter < search_start && start_index < n_keys) {
             const auto key_len = detail::read_compressed_int(counter, end);
+            if (static_cast<size_t>(end - counter) < key_len) [[unlikely]] {
+               break;
+            }
             counter += key_len;
             counter = detail::skip_value_beve_lazy<Opts>(counter, end);
             ++start_index;
@@ -748,6 +763,9 @@ namespace glz
       const char* iter = search_start;
       for (size_t i = start_index; i < n_keys; ++i) {
          const auto key_len = detail::read_compressed_int(iter, end);
+         if (static_cast<size_t>(end - iter) < key_len) [[unlikely]] {
+            return make_error(error_code::unexpected_end);
+         }
          std::string_view current_key{iter, key_len};
          iter += key_len;
 
@@ -764,6 +782,9 @@ namespace glz
          iter = p;
          for (size_t i = 0; i < start_index; ++i) {
             const auto key_len = detail::read_compressed_int(iter, end);
+            if (static_cast<size_t>(end - iter) < key_len) [[unlikely]] {
+               return make_error(error_code::unexpected_end);
+            }
             std::string_view current_key{iter, key_len};
             iter += key_len;
 
@@ -884,6 +905,13 @@ namespace glz
          if (has_string_keys_) {
             // String key: length prefix + string data
             const auto key_len = detail::read_compressed_int(current_pos_, beve_end_);
+            if (static_cast<size_t>(beve_end_ - current_pos_) < key_len) [[unlikely]] {
+               // Declared key length runs past the buffer; stop rather than
+               // handing back a view over out-of-bounds memory.
+               at_end_ = true;
+               current_view_ = lazy_beve_view<Opts>::make_error(error_code::unexpected_end);
+               return;
+            }
             key = std::string_view{current_pos_, key_len};
             current_pos_ += key_len;
          }
@@ -981,6 +1009,11 @@ namespace glz
             // Object with string keys
             for (size_t i = 0; i < count; ++i) {
                const auto key_len = detail::read_compressed_int(p, end);
+               if (static_cast<size_t>(end - p) < key_len) [[unlikely]] {
+                  // Truncated key; stop indexing instead of storing an
+                  // out-of-bounds key view.
+                  break;
+               }
                std::string_view key{p, key_len};
                p += key_len;
 
