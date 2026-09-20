@@ -469,10 +469,11 @@ namespace glz
                   return 64;
                }
                else if constexpr (sizeof(T) > 4) {
-                  return 32;
+                  // zmij scratch + 4 for optional quotes and trailing comma.
+                  return zmij::double_buffer_size + 4;
                }
                else {
-                  return 24;
+                  return zmij::float_buffer_size + 4;
                }
             }
             else if constexpr (sizeof(T) > 4) {
@@ -1197,7 +1198,7 @@ namespace glz
    template <auto Opts, class Key, class Value, is_context Ctx, class B>
    GLZ_ALWAYS_INLINE void write_pair_content(const Key& key, Value&& value, Ctx& ctx, B&& b, auto& ix)
    {
-      if constexpr (str_t<Key> || char_t<Key> || glaze_enum_t<Key> || mimics_str_t<Key> || custom_str_t<Key> ||
+      if constexpr (str_t<Key> || char_t<Key> || is_named_enum<Key> || mimics_str_t<Key> || custom_str_t<Key> ||
                     check_quoted_num(Opts)) {
          to<JSON, core_t<Key>>::template op<Opts>(key, ctx, b, ix);
       }

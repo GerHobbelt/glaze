@@ -82,7 +82,9 @@ nav:
  - Formats:
    - JSON: json.md
    - BEVE (binary): binary.md
+   - BSON: bson.md
    - CBOR: cbor.md
+   - JSONB: jsonb.md
    - CSV: csv.md
    - MessagePack: msgpack.md
    - Stencil/Mustache: stencil-mustache.md

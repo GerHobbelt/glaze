@@ -9,33 +9,12 @@
 #include "glaze/core/context.hpp"
 #include "glaze/core/optimization_level.hpp"
 #include "glaze/core/traits.hpp"
+#include "glaze/forward.hpp"
 #include "glaze/util/inline.hpp"
 #include "glaze/util/type_traits.hpp"
 
 namespace glz
 {
-   // Formats
-   // Built in formats must be less than 65536
-   // User defined formats can be 65536 to 4294967296
-   inline constexpr uint32_t INVALID = 0;
-   inline constexpr uint32_t BEVE = 1;
-   inline constexpr uint32_t CBOR = 2; // RFC 8949 - Concise Binary Object Representation
-   inline constexpr uint32_t JSON = 10;
-   inline constexpr uint32_t JSON_PTR = 20;
-   inline constexpr uint32_t MSGPACK = 30;
-   inline constexpr uint32_t NDJSON = 100; // new line delimited JSON
-   inline constexpr uint32_t TOML = 400;
-   inline constexpr uint32_t YAML = 450;
-   inline constexpr uint32_t STENCIL = 500;
-   inline constexpr uint32_t MUSTACHE = 501;
-   inline constexpr uint32_t CSV = 10000;
-   inline constexpr uint32_t EETF = 20000;
-
-   // Protocol formats
-   inline constexpr uint32_t REPE = 30000;
-   inline constexpr uint32_t REST = 30100;
-   inline constexpr uint32_t JSONRPC = 30200;
-
    // layout
    inline constexpr uint8_t rowwise = 0;
    inline constexpr uint8_t colwise = 1;
@@ -114,6 +93,7 @@ namespace glz
       uint8_t layout = rowwise; // CSV row wise output/input
       bool use_headers = true; // Whether to write column/row headers in CSV format
       bool raw_string = false; // do not decode/encode escaped characters for strings (improves read/write performance)
+      char delimiter = ','; // field delimiter character (e.g. ',', ';', '|', '\t')
 
       // New options for headerless CSV support
       bool skip_header_row =
@@ -545,6 +525,31 @@ namespace glz
       }
       else {
          return false;
+      }
+   }
+
+   consteval bool is_valid_csv_delimiter(char c)
+   {
+      switch (c) {
+      case ',':
+      case '\t':
+      case '|':
+      case ';':
+         return true;
+      default:
+         return false;
+      }
+   }
+
+   template <auto Opts>
+   consteval char csv_delimiter()
+   {
+      if constexpr (requires { Opts.delimiter; }) {
+         static_assert(is_valid_csv_delimiter(Opts.delimiter), "CSV delimiter must be one of: ',' '\\t' '|' ';'");
+         return Opts.delimiter;
+      }
+      else {
+         return ',';
       }
    }
 
@@ -1401,6 +1406,22 @@ namespace glz
    }
 
    template <auto Opts>
+   constexpr auto set_jsonb()
+   {
+      auto ret = Opts;
+      ret.format = JSONB;
+      return ret;
+   }
+
+   template <auto Opts>
+   constexpr auto set_bson()
+   {
+      auto ret = Opts;
+      ret.format = BSON;
+      return ret;
+   }
+
+   template <auto Opts>
    constexpr auto set_json()
    {
       auto ret = Opts;
@@ -1435,36 +1456,15 @@ namespace glz
 
 namespace glz
 {
-   template <uint32_t Format = INVALID, class T = void>
-   struct to;
-
-   template <uint32_t Format = INVALID, class T = void>
-   struct from;
-
-   // Note: specified and is_specified are defined in glaze/core/traits.hpp
-
-   template <uint32_t Format = INVALID, class T = void>
-   struct to_partial;
-
-   template <uint32_t Format = INVALID>
-   struct skip_value;
+   // Note: primary templates for glz::to, glz::from, glz::to_partial, glz::skip_value,
+   // glz::parse, glz::serialize, glz::serialize_partial live in glaze/forward.hpp.
+   // Note: specified and is_specified are defined in glaze/core/traits.hpp.
 
    template <class T, uint32_t Format>
    concept write_supported = requires { to<Format, std::remove_cvref_t<T>>{}; };
 
    template <class T, uint32_t Format>
    concept read_supported = requires { from<Format, std::remove_cvref_t<T>>{}; };
-
-   // These templates save typing by determining the core type used to select the proper to/from specialization
-   // Long term I would like to remove these detail indirections.
-
-   template <uint32_t Format>
-   struct parse
-   {};
-
-   template <uint32_t Format>
-   struct serialize
-   {};
 
    // Default context type for a format.
    // Formats that need a richer context (e.g. YAML) specialize this.
@@ -1476,10 +1476,6 @@ namespace glz
 
    template <uint32_t Format>
    using format_context_t = typename format_context<Format>::type;
-
-   template <uint32_t Format>
-   struct serialize_partial
-   {};
 
    // Preset options for size-optimized builds (embedded systems)
    struct opts_size : opts

@@ -122,6 +122,20 @@ namespace glz
       }
    }
 
+   // Named helper instead of IIFE so MSVC's lambda name mangling doesn't alias it
+   // against unrelated IIFEs at deeper template instantiation depths.
+   template <class Tuple, template <class> class Predicate, size_t... Is>
+   consteval auto filter_indices_expand(std::index_sequence<Is...>)
+   {
+      constexpr bool matches[] = {Predicate<glz::tuple_element_t<Is, Tuple>>::value...};
+      constexpr size_t count = (matches[Is] + ...);
+
+      std::array<size_t, count> indices{};
+      size_t index = 0;
+      ((void)((matches[Is] ? (indices[index++] = Is, true) : false)), ...);
+      return indices;
+   }
+
    // Get indices of elements satisfying a predicate
    template <class Tuple, template <class> class Predicate>
    consteval auto filter_indices()
@@ -131,15 +145,7 @@ namespace glz
          return std::array<size_t, 0>{};
       }
       else {
-         return []<size_t... Is>(std::index_sequence<Is...>) constexpr {
-            constexpr bool matches[] = {Predicate<glz::tuple_element_t<Is, Tuple>>::value...};
-            constexpr size_t count = (matches[Is] + ...);
-
-            std::array<size_t, count> indices{};
-            size_t index = 0;
-            ((void)((matches[Is] ? (indices[index++] = Is, true) : false)), ...);
-            return indices;
-         }(std::make_index_sequence<N>{});
+         return filter_indices_expand<Tuple, Predicate>(std::make_index_sequence<N>{});
       }
    }
 
@@ -244,7 +250,8 @@ namespace glz
    // MSVC requires this template specialization for when the tuple size if zero,
    // otherwise MSVC tries to instantiate calls of get<0> in invalid branches
    template <class T>
-      requires((glaze_object_t<T> || glaze_flags_t<T> || glaze_enum_t<T>) && (tuple_size_v<meta_t<T>> == 0))
+      requires(!glaze_merge_t<T> && (glaze_object_t<T> || glaze_flags_t<T> || glaze_enum_t<T>) &&
+               (tuple_size_v<meta_t<T>> == 0))
    struct reflect<T>
    {
       static constexpr auto size = 0;
@@ -256,7 +263,7 @@ namespace glz
    };
 
    template <class T>
-      requires(!meta_keys<T> && (glaze_object_t<T> || glaze_flags_t<T> || glaze_enum_t<T>) &&
+      requires(!meta_keys<T> && !glaze_merge_t<T> && (glaze_object_t<T> || glaze_flags_t<T> || glaze_enum_t<T>) &&
                (tuple_size_v<meta_t<T>> != 0))
    struct reflect<T>
    {
@@ -285,6 +292,115 @@ namespace glz
          }(std::make_index_sequence<value_indices.size()>{});
          return res;
       }();
+
+      template <size_t I>
+      using elem = decltype(get<I>(values));
+
+      template <size_t I>
+      using type = member_t<V, decltype(get<I>(values))>;
+   };
+
+   namespace detail
+   {
+      // Chains an outer member pointer with inner sub-field access for merge-in-meta types.
+      template <class ParentType, size_t OuterIdx, size_t InnerIdx>
+      struct merge_accessor
+      {
+         static constexpr auto outer_ptr = get<OuterIdx>(meta_v<ParentType>);
+         using SubType = std::remove_cvref_t<typename member_value<std::decay_t<decltype(outer_ptr)>>::type>;
+
+         constexpr decltype(auto) operator()(auto&& parent) const
+         {
+            if constexpr (glaze_object_t<SubType>) {
+               return get_member(parent.*outer_ptr, get<InnerIdx>(reflect<SubType>::values));
+            }
+            else {
+               // Aggregate/reflectable sub-type without glz::meta — access fields via to_tie
+               static_assert(reflectable<SubType>, "glz::merge sub-types must be glaze_object_t or reflectable");
+               return get<InnerIdx>(to_tie(parent.*outer_ptr));
+            }
+         }
+      };
+
+      struct merge_index_pair
+      {
+         size_t outer;
+         size_t inner;
+      };
+   }
+
+   template <class T>
+      requires(glaze_merge_t<T>)
+   struct reflect<T>
+   {
+      using V = std::remove_cvref_t<T>;
+
+      static constexpr auto num_merge_members = tuple_size_v<meta_t<V>>;
+
+      // Get the sub-type pointed to by the I-th member pointer in the merge
+      template <size_t I>
+      using sub_type_at = std::remove_cvref_t<typename member_value<std::decay_t<decltype(get<I>(meta_v<V>))>>::type>;
+
+      // Per-sub-type sizes — computed once and reused below.
+      static constexpr auto sub_sizes = []<size_t... I>(std::index_sequence<I...>) constexpr {
+         return std::array<size_t, num_merge_members>{reflect<sub_type_at<I>>::size...};
+      }(std::make_index_sequence<num_merge_members>{});
+
+      // Total number of flattened fields
+      static constexpr size_t size = []() constexpr {
+         size_t total = 0;
+         for (auto s : sub_sizes) total += s;
+         return total;
+      }();
+
+      // Concatenated keys from all sub-types
+      static constexpr auto keys = []() constexpr {
+         std::array<sv, size> result{};
+         size_t offset = 0;
+         auto copy_keys = [&]<size_t OuterI>() constexpr {
+            using SubType = sub_type_at<OuterI>;
+            constexpr auto sub_size = reflect<SubType>::size;
+            for (size_t j = 0; j < sub_size; ++j) {
+               result[offset + j] = reflect<SubType>::keys[j];
+            }
+            offset += sub_size;
+         };
+         [&]<size_t... I>(std::index_sequence<I...>) constexpr {
+            (copy_keys.template operator()<I>(), ...);
+         }(std::make_index_sequence<num_merge_members>{});
+         return result;
+      }();
+
+      static constexpr bool unique_keys = []() constexpr {
+         for (size_t i = 0; i < size; ++i) {
+            for (size_t j = i + 1; j < size; ++j) {
+               if (keys[i] == keys[j]) {
+                  return false;
+               }
+            }
+         }
+         return true;
+      }();
+      static_assert(unique_keys, "glz::merge sub-types must not have duplicate keys");
+
+      // Pre-computed (outer, inner) pair for each flat index. Lets `values`
+      // build merge_accessor types via array lookups rather than per-index
+      // consteval function template instantiations.
+      static constexpr auto flat_layout = []() constexpr {
+         std::array<detail::merge_index_pair, size> result{};
+         size_t flat = 0;
+         for (size_t o = 0; o < num_merge_members; ++o) {
+            for (size_t i = 0; i < sub_sizes[o]; ++i) {
+               result[flat++] = {o, i};
+            }
+         }
+         return result;
+      }();
+
+      // Flat values tuple built directly — avoids tuplet::tuple_cat (which has GCC issues)
+      static constexpr auto values = []<size_t... I>(std::index_sequence<I...>) {
+         return tuple{detail::merge_accessor<V, flat_layout[I].outer, flat_layout[I].inner>{}...};
+      }(std::make_index_sequence<size>{});
 
       template <size_t I>
       using elem = decltype(get<I>(values));
@@ -657,6 +773,14 @@ namespace glz
       if constexpr (Opts.error_on_missing_keys) {
          for_each<N>([&]<auto I>() constexpr {
             using V = std::decay_t<refl_t<T, I>>;
+
+            // Fields whose type is always_skipped (hidden, skip, includer, or a
+            // type that opted out via meta::value = skip{}) are never written,
+            // so they must not be marked required.
+            if constexpr (always_skipped<V>) {
+               fields[I] = false;
+               return;
+            }
 
             // Check if field is skipped during parse - if so, don't require it
             if constexpr (meta_has_skip<T>) {
@@ -1419,45 +1543,49 @@ namespace glz
          return {};
       }
 
-      // This could be a std::array, but each length N for std::array causes unique template instaniations
-      // This propagates to std::ranges::sort, so using std::vector means less template instaniations
-      std::vector<std::string_view> strings{};
-      strings.reserve(N);
-      for (size_t i = 0; i < N; ++i) {
-         strings.emplace_back(input_strings[i]);
+      // Copy into a local array and insertion-sort by size. We use the caller's array
+      // type directly (e.g. std::array<sv, N>) and a hand-rolled sort rather than
+      // std::ranges::sort so the sort body is not template-instantiated per N — a
+      // previous version went via std::vector specifically to avoid per-N ranges::sort
+      // instantiations, at the cost of constexpr heap evaluation. For typical N
+      // (struct key counts, usually ≤ max_pure_reflection_count) insertion sort is fine.
+      auto strings = input_strings;
+      for (size_t i = 1; i < N; ++i) {
+         auto key = strings[i];
+         size_t j = i;
+         while (j > 0 && strings[j - 1].size() > key.size()) {
+            strings[j] = strings[j - 1];
+            --j;
+         }
+         strings[j] = key;
       }
 
-      std::ranges::sort(strings, [](const auto& a, const auto& b) { return a.size() < b.size(); });
-
-      if (strings.front().empty() || strings.back().size() >= 255) {
+      if (strings[0].empty() || strings[N - 1].size() >= 255) {
          return {};
       }
 
       unique_per_length_t info{.valid = true};
       info.unique_index.fill(255);
 
-      // Process each unique length
-      for (size_t len = strings.front().size(); len <= strings.back().size(); ++len) {
-         auto range_begin = std::lower_bound(strings.begin(), strings.end(), len,
-                                             [](const auto& s, size_t l) { return s.length() < l; });
+      for (size_t len = strings[0].size(); len <= strings[N - 1].size(); ++len) {
+         // Locate the subrange of keys with this length. Input is sorted by size, so
+         // entries of a given length form a contiguous run; a linear scan is enough
+         // and sidesteps the std::lower_bound / std::upper_bound instantiations.
+         size_t rb = N, re = N;
+         for (size_t i = 0; i < N; ++i) {
+            if (strings[i].size() == len) {
+               if (rb == N) rb = i;
+               re = i + 1;
+            }
+         }
+         if (rb == re) continue;
 
-         auto range_end =
-            std::upper_bound(range_begin, strings.end(), len, [](size_t l, const auto& s) { return l < s.length(); });
-
-         auto range = std::ranges::subrange(range_begin, range_end);
-
-         if (range.begin() == range.end()) continue;
-
-         // Find the first unique character for this length
          bool found = false;
          for (size_t pos = 0; pos < len; ++pos) {
             std::array<int, 256> char_count = {};
-
-            // Count occurrences of each character at this position
-            for (auto it = range.begin(); it != range.end(); ++it) {
-               ++char_count[uint8_t((*it)[pos])];
+            for (size_t i = rb; i < re; ++i) {
+               ++char_count[uint8_t(strings[i][pos])];
             }
-
             bool collision = false;
             for (const auto count : char_count) {
                if (count > 1) {

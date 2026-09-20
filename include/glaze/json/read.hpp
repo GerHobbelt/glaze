@@ -2350,7 +2350,7 @@ namespace glz
                   }
 
                   if constexpr (has_try_emplace_back<T>) {
-                     if (value.try_emplace_back() != nullptr)
+                     if (value.try_emplace_back())
                         parse<JSON>::op<ws_handled<Opts>()>(value.back(), ctx, it, end);
                      else
                         ctx.error = error_code::exceeded_static_array_size;
@@ -2466,7 +2466,7 @@ namespace glz
             }
 
             if constexpr (has_try_emplace_back<T>) {
-               if (value.try_emplace_back() == nullptr) [[unlikely]] {
+               if (not value.try_emplace_back()) [[unlikely]] {
                   ctx.error = error_code::exceeded_static_array_size;
                   return;
                }
@@ -3344,7 +3344,7 @@ namespace glz
                   }
                   else {
                      Key key_value{};
-                     if constexpr (glaze_enum_t<Key> || mimics_str_t<Key>) {
+                     if constexpr (is_named_enum<Key> || mimics_str_t<Key>) {
                         parse<JSON>::op<Opts>(key_value, ctx, it, end);
                      }
                      else if constexpr (std::is_arithmetic_v<Key>) {
@@ -3473,6 +3473,10 @@ namespace glz
    template <class T>
    struct is_variant_object : std::bool_constant<variant_object_type<T>>
    {};
+   // Range-of-pairs alternatives parse as a JSON object only when the `concatenate` option is enabled (default).
+   template <class T>
+   struct is_variant_concat_object : std::bool_constant<json_pair_range_object<T>>
+   {};
    template <class T>
    struct is_variant_array : std::bool_constant<variant_array_type<T>>
    {};
@@ -3545,6 +3549,31 @@ namespace glz
       static constexpr auto n_array = variant_count_v<T, is_variant_array>;
       static constexpr auto n_null = variant_count_v<T, is_variant_null>;
    };
+
+   // Number of variant alternatives that should be treated as JSON objects under the active options.
+   // Includes range-of-pair alternatives only when `concatenate` is enabled (default).
+   //
+   // Note: this preserves the existing predicate used by the variant '{' fast path. Because
+   // `variant_type_count::n_object` already includes `n_nullable_object`, adding
+   // `n_nullable_object` again effectively excludes nullable-object alternatives from the
+   // single-candidate fast path (which only knows how to dispatch a non-nullable object index).
+   template <auto Opts, class T>
+   constexpr size_t variant_object_candidate_count_v =
+      variant_type_count<T>::n_object + variant_type_count<T>::n_nullable_object +
+      (check_concatenate(Opts) ? variant_count_v<T, is_variant_concat_object> : 0);
+
+   // First variant index that is an object candidate under the active options. Prefers a true
+   // `is_variant_object` match; falls back to `is_variant_concat_object` when concatenate is enabled.
+   template <auto Opts, class T>
+   constexpr size_t variant_first_object_candidate_v = []() {
+      constexpr auto obj_idx = variant_first_index_v<T, is_variant_object>;
+      if constexpr (obj_idx != std::variant_npos)
+         return obj_idx;
+      else if constexpr (check_concatenate(Opts))
+         return variant_first_index_v<T, is_variant_concat_object>;
+      else
+         return std::variant_npos;
+   }();
 
    // Process variant alternatives by iterating directly over variant indices
    // (replaces tuple_cat + tuple iteration approach)
@@ -3690,7 +3719,7 @@ namespace glz
             case '\0':
                ctx.error = error_code::unexpected_end;
                return;
-            case '{':
+            case '{': {
                if (ctx.depth >= max_recursive_depth_limit) {
                   ctx.error = error_code::exceeded_max_recursive_depth;
                   return;
@@ -3707,13 +3736,13 @@ namespace glz
                   }
                }
                using type_counts = variant_type_count<T>;
-               if constexpr ((type_counts::n_object < 1) //
-                             && (type_counts::n_nullable_object < 1)) {
+               constexpr auto n_object_candidates = variant_object_candidate_count_v<Opts, T>;
+               if constexpr (n_object_candidates < 1) {
                   ctx.error = error_code::no_matching_variant_type;
                   return;
                }
-               else if constexpr ((type_counts::n_object + type_counts::n_nullable_object) == 1 && tag_v<T>.empty()) {
-                  constexpr auto first_idx = variant_first_index_v<T, is_variant_object>;
+               else if constexpr (n_object_candidates == 1 && tag_v<T>.empty()) {
+                  constexpr auto first_idx = variant_first_object_candidate_v<Opts, T>;
                   using V = std::variant_alternative_t<first_idx, T>;
                   if (!std::holds_alternative<V>(value)) value = V{};
                   parse<JSON>::op<opening_handled<Opts>()>(std::get<V>(value), ctx, it, end);
@@ -4306,6 +4335,7 @@ namespace glz
                   }
                }
                break;
+            }
             case '[':
                if (ctx.depth >= max_recursive_depth_limit) {
                   ctx.error = error_code::exceeded_max_recursive_depth;
@@ -4701,7 +4731,6 @@ namespace glz
    };
 
    // system_clock::time_point: parse from ISO 8601 string
-   // Fast manual parser - no heap allocations, direct character parsing
    template <is_system_time_point T>
       requires(not custom_read<T>)
    struct from<JSON, T>
@@ -4711,139 +4740,9 @@ namespace glz
       {
          std::string_view str;
          from<JSON, std::string_view>::template op<Opts>(str, ctx, it, end);
-
          if (bool(ctx.error)) [[unlikely]]
             return;
-
-         // Minimum: YYYY-MM-DDTHH:MM:SS = 19 chars (timezone is optional, defaults to UTC)
-         if (str.size() < 19) [[unlikely]] {
-            ctx.error = error_code::parse_error;
-            return;
-         }
-
-         const char* s = str.data();
-         const auto n = str.size();
-
-         // Helper to parse N digits
-         auto parse_digits = [&s](size_t start, size_t count) -> int {
-            int val = 0;
-            for (size_t i = 0; i < count; ++i) {
-               const char c = s[start + i];
-               if (c < '0' || c > '9') return -1;
-               val = val * 10 + (c - '0');
-            }
-            return val;
-         };
-
-         // YYYY-MM-DDTHH:MM:SS
-         const int yr = parse_digits(0, 4);
-         const int mo = parse_digits(5, 2);
-         const int dy = parse_digits(8, 2);
-         const int hr = parse_digits(11, 2);
-         const int mi = parse_digits(14, 2);
-         const int sc = parse_digits(17, 2);
-
-         if (yr < 0 || mo < 0 || dy < 0 || hr < 0 || mi < 0 || sc < 0 || s[4] != '-' || s[7] != '-' || s[10] != 'T' ||
-             s[13] != ':' || s[16] != ':') [[unlikely]] {
-            ctx.error = error_code::parse_error;
-            return;
-         }
-
-         // Validate ranges (leap seconds not supported - std::chrono::system_clock uses Unix time)
-         if (mo < 1 || mo > 12 || dy < 1 || dy > 31 || hr > 23 || mi > 59 || sc > 59) [[unlikely]] {
-            ctx.error = error_code::parse_error;
-            return;
-         }
-
-         // Parse optional fractional seconds
-         size_t pos = 19;
-         int64_t subsec_nanos = 0;
-         if (pos < n && s[pos] == '.') {
-            ++pos;
-            int64_t frac = 0;
-            int digits = 0;
-            while (pos < n && s[pos] >= '0' && s[pos] <= '9') {
-               if (digits < 9) {
-                  frac = frac * 10 + (s[pos] - '0');
-                  ++digits;
-               }
-               ++pos;
-            }
-            if (digits == 0) [[unlikely]] {
-               ctx.error = error_code::parse_error;
-               return;
-            }
-            // Scale to nanoseconds
-            static constexpr int64_t scale[] = {1000000000, 100000000, 10000000, 1000000, 100000,
-                                                10000,      1000,      100,      10,      1};
-            subsec_nanos = frac * scale[digits];
-         }
-
-         // Parse timezone: Z or +HH:MM or -HH:MM (defaults to UTC if missing)
-         int tz_offset_seconds = 0;
-         if (pos < n) {
-            if (s[pos] == 'Z') {
-               ++pos; // consume 'Z'
-            }
-            else if (s[pos] == '+' || s[pos] == '-') {
-               // +05:00 means local is ahead of UTC, so subtract to get UTC (multiply by -1)
-               // -08:00 means local is behind UTC, so add to get UTC (multiply by +1)
-               const int utc_adjustment = (s[pos] == '+') ? -1 : 1;
-               ++pos;
-               if (pos + 2 > n) [[unlikely]] {
-                  ctx.error = error_code::parse_error;
-                  return;
-               }
-               const int tz_hour = parse_digits(pos, 2);
-               if (tz_hour < 0 || tz_hour > 23) [[unlikely]] {
-                  ctx.error = error_code::parse_error;
-                  return;
-               }
-               pos += 2;
-               int tz_min = 0;
-               bool has_tz_colon = false;
-               if (pos < n && s[pos] == ':') {
-                  ++pos;
-                  has_tz_colon = true;
-               }
-               if (pos + 2 <= n) {
-                  const int m = parse_digits(pos, 2);
-                  if (m < 0 || m > 59) [[unlikely]] {
-                     ctx.error = error_code::parse_error;
-                     return;
-                  }
-                  tz_min = m;
-                  pos += 2;
-               }
-               else if (has_tz_colon) [[unlikely]] {
-                  // Colon present but minutes missing or incomplete
-                  ctx.error = error_code::parse_error;
-                  return;
-               }
-               tz_offset_seconds = utc_adjustment * (tz_hour * 3600 + tz_min * 60);
-            }
-         }
-
-         // Reject trailing characters
-         if (pos != n) [[unlikely]] {
-            ctx.error = error_code::parse_error;
-            return;
-         }
-
-         // Construct time_point using std::chrono calendar types
-         using namespace std::chrono;
-
-         const auto ymd = year_month_day{year{yr}, month{static_cast<unsigned>(mo)}, day{static_cast<unsigned>(dy)}};
-         if (!ymd.ok()) [[unlikely]] {
-            ctx.error = error_code::parse_error;
-            return;
-         }
-
-         const auto tp = sys_days{ymd} + hours{hr} + minutes{mi} + seconds{sc} + seconds{tz_offset_seconds} +
-                         nanoseconds{subsec_nanos};
-
-         using Duration = typename std::remove_cvref_t<T>::duration;
-         value = time_point_cast<Duration>(tp);
+         chrono_detail::parse_iso8601(str, value, ctx.error);
       }
    };
 
