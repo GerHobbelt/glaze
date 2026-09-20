@@ -34,7 +34,7 @@ class slow_stringbuf : public std::stringbuf
    std::streamsize xsgetn(char* s, std::streamsize n) override
    {
       // Only return up to max_bytes_per_read_ bytes, simulating chunked arrival
-      return std::stringbuf::xsgetn(s, std::min(n, static_cast<std::streamsize>(max_bytes_per_read_)));
+      return std::stringbuf::xsgetn(s, (std::min)(n, static_cast<std::streamsize>(max_bytes_per_read_)));
    }
 };
 
@@ -113,7 +113,7 @@ class pipe_buffer : public std::streambuf
          return 0;
       }
 
-      size_t to_read = std::min(static_cast<size_t>(n), available);
+      size_t to_read = (std::min)(static_cast<size_t>(n), available);
       std::memcpy(s, buffer_.data() + read_pos_, to_read);
       read_pos_ += to_read;
 
@@ -148,7 +148,7 @@ class slow_ostringbuf : public std::stringbuf
       std::streamsize total_written = 0;
       while (total_written < n) {
          ++total_write_calls_;
-         std::streamsize to_write = std::min(n - total_written, static_cast<std::streamsize>(max_bytes_per_write_));
+         std::streamsize to_write = (std::min)(n - total_written, static_cast<std::streamsize>(max_bytes_per_write_));
          auto written = std::stringbuf::xsputn(s + total_written, to_write);
          if (written <= 0) break; // Error case
          total_written += written;
@@ -474,6 +474,121 @@ suite json_read_streaming_tests = [] {
          expect(!glz::read_json(val, buffer));
          expect(val == "hello");
       }
+   };
+};
+
+// Regression tests for https://github.com/stephenberry/glaze/issues/2609
+// Skipping unknown keys (error_on_unknown_keys = false) must refill the
+// streaming buffer when the skipped value is larger than the buffer.
+suite json_streaming_skip_unknown_tests = [] {
+   "skip unknown array larger than buffer"_test = [] {
+      std::string json = R"({"fill":[)";
+      for (int i = 0; i < 4096; ++i) {
+         json += "0,";
+      }
+      json.back() = ']'; // replace trailing comma
+      json += R"(,"id":7,"name":"after"})";
+      expect(json.size() > 1024u);
+
+      std::istringstream iss(json);
+      glz::istream_buffer<1024> buffer(iss);
+
+      Record r{};
+      auto ec = glz::read_streaming<glz::opts{.error_on_unknown_keys = false}>(r, buffer);
+      expect(!ec) << glz::format_error(ec, json);
+      expect(r.id == 7);
+      expect(r.name == "after");
+   };
+
+   "skip unknown nested object larger than buffer"_test = [] {
+      std::string json = R"({"fill":{)";
+      for (int i = 0; i < 512; ++i) {
+         json += "\"k" + std::to_string(i) + R"(":{"a":[1,2,3],"b":"text"},)";
+      }
+      json.pop_back(); // remove trailing comma
+      json += R"(},"id":3,"name":"nested"})";
+      expect(json.size() > 1024u);
+
+      std::istringstream iss(json);
+      glz::istream_buffer<1024> buffer(iss);
+
+      Record r{};
+      auto ec = glz::read_streaming<glz::opts{.error_on_unknown_keys = false}>(r, buffer);
+      expect(!ec) << glz::format_error(ec, json);
+      expect(r.id == 3);
+      expect(r.name == "nested");
+   };
+
+   "skip unknown string larger than buffer with escapes"_test = [] {
+      std::string json = R"({"fill":")";
+      for (int i = 0; i < 1024; ++i) {
+         json += R"(abc\"\\)";
+      }
+      json += R"(","id":9,"name":"escaped"})";
+      expect(json.size() > 1024u);
+
+      std::istringstream iss(json);
+      glz::istream_buffer<1024> buffer(iss);
+
+      Record r{};
+      auto ec = glz::read_streaming<glz::opts{.error_on_unknown_keys = false}>(r, buffer);
+      expect(!ec) << glz::format_error(ec, json);
+      expect(r.id == 9);
+      expect(r.name == "escaped");
+   };
+
+   "skip unknown array with chunked stream arrival"_test = [] {
+      std::string json = R"({"fill":[)";
+      for (int i = 0; i < 4096; ++i) {
+         json += std::to_string(i) + ",";
+      }
+      json.back() = ']';
+      json += R"(,"id":1,"name":"chunked"})";
+
+      slow_stringbuf sbuf(json, 100); // data arrives 100 bytes at a time
+      std::istream stream(&sbuf);
+      glz::istream_buffer<1024> buffer(stream);
+
+      Record r{};
+      auto ec = glz::read_streaming<glz::opts{.error_on_unknown_keys = false}>(r, buffer);
+      expect(!ec) << glz::format_error(ec, json);
+      expect(r.id == 1);
+      expect(r.name == "chunked");
+   };
+
+   "skip multiple unknown keys spanning refills"_test = [] {
+      std::string big_array = "[";
+      for (int i = 0; i < 2048; ++i) {
+         big_array += "1,";
+      }
+      big_array.back() = ']';
+
+      std::string json = R"({"a":)" + big_array + R"(,"id":5,"b":)" + big_array + R"(,"name":"multi","c":true})";
+
+      std::istringstream iss(json);
+      glz::istream_buffer<1024> buffer(iss);
+
+      Record r{};
+      auto ec = glz::read_streaming<glz::opts{.error_on_unknown_keys = false}>(r, buffer);
+      expect(!ec) << glz::format_error(ec, json);
+      expect(r.id == 5);
+      expect(r.name == "multi");
+   };
+
+   "unterminated unknown value still errors"_test = [] {
+      std::string json = R"({"fill":[)";
+      for (int i = 0; i < 2048; ++i) {
+         json += "0,";
+      }
+      // never closed
+
+      std::istringstream iss(json);
+      glz::istream_buffer<1024> buffer(iss);
+
+      Record r{};
+      auto ec = glz::read_streaming<glz::opts{.error_on_unknown_keys = false}>(r, buffer);
+      expect(bool(ec));
+      expect(ec.ec == glz::error_code::unexpected_end);
    };
 };
 
@@ -1249,7 +1364,7 @@ suite async_streaming_tests = [] {
          size_t pos = 0;
          size_t chunk_size = 5;
          while (pos < json.size()) {
-            size_t len = std::min(chunk_size, json.size() - pos);
+            size_t len = (std::min)(chunk_size, json.size() - pos);
             pbuf.write(json.data() + pos, len);
             pos += len;
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1287,7 +1402,7 @@ suite async_streaming_tests = [] {
          // Send in variable-sized chunks
          size_t pos = 0;
          while (pos < json.size()) {
-            size_t len = std::min(size_t(7 + (pos % 5)), json.size() - pos); // Varying chunk sizes
+            size_t len = (std::min)(size_t(7 + (pos % 5)), json.size() - pos); // Varying chunk sizes
             pbuf.write(json.data() + pos, len);
             pos += len;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1320,7 +1435,7 @@ suite async_streaming_tests = [] {
          // Send with longer delays between chunks
          size_t pos = 0;
          while (pos < json.size()) {
-            size_t len = std::min(size_t(10), json.size() - pos);
+            size_t len = (std::min)(size_t(10), json.size() - pos);
             pbuf.write(json.data() + pos, len);
             pos += len;
             std::this_thread::sleep_for(std::chrono::milliseconds(15));
@@ -3451,7 +3566,7 @@ suite buffer_size_requirements = [] {
    };
 
    "DBL_MAX and DBL_MIN with minimum 512-byte buffer"_test = [] {
-      std::vector<double> original = {std::numeric_limits<double>::max(), std::numeric_limits<double>::min(),
+      std::vector<double> original = {(std::numeric_limits<double>::max)(), (std::numeric_limits<double>::min)(),
                                       std::numeric_limits<double>::lowest(), std::numeric_limits<double>::epsilon()};
 
       std::ostringstream oss;

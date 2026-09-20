@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <string_view>
@@ -42,6 +43,17 @@ struct advanced_container
    nested inner{};
    nested inner_two{};
    double value = 5.5;
+};
+
+struct deep_container
+{
+   simple_container nested;
+};
+struct deep_container_optional
+{
+   std::optional<simple_container> nested1;
+   std::optional<simple_container> nested2;
+   std::optional<simple_container> nested3;
 };
 
 struct level_one
@@ -749,13 +761,13 @@ arr = [4, 5, 6])";
          std::string toml_input = "-128";
          std::int8_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::int8_t>::min());
+         expect(value == (std::numeric_limits<std::int8_t>::min)());
       }
       {
          std::string toml_input = "127";
          std::int8_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::int8_t>::max());
+         expect(value == (std::numeric_limits<std::int8_t>::max)());
       }
       {
          std::string toml_input = "-129";
@@ -778,13 +790,13 @@ arr = [4, 5, 6])";
          std::string toml_input = "0";
          std::uint8_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::uint8_t>::min());
+         expect(value == (std::numeric_limits<std::uint8_t>::min)());
       }
       {
          std::string toml_input = "255";
          std::uint8_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::uint8_t>::max());
+         expect(value == (std::numeric_limits<std::uint8_t>::max)());
       }
       {
          std::string toml_input = "-1";
@@ -807,13 +819,13 @@ arr = [4, 5, 6])";
          std::string toml_input = "-32768";
          std::int16_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::int16_t>::min());
+         expect(value == (std::numeric_limits<std::int16_t>::min)());
       }
       {
          std::string toml_input = "32767";
          std::int16_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::int16_t>::max());
+         expect(value == (std::numeric_limits<std::int16_t>::max)());
       }
       {
          std::string toml_input = "-32769";
@@ -836,13 +848,13 @@ arr = [4, 5, 6])";
          std::string toml_input = "0";
          std::uint16_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::uint16_t>::min());
+         expect(value == (std::numeric_limits<std::uint16_t>::min)());
       }
       {
          std::string toml_input = "65535";
          std::uint16_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::uint16_t>::max());
+         expect(value == (std::numeric_limits<std::uint16_t>::max)());
       }
       {
          std::string toml_input = "-1";
@@ -865,13 +877,13 @@ arr = [4, 5, 6])";
          std::string toml_input = "-2147483648";
          std::int32_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::int32_t>::min());
+         expect(value == (std::numeric_limits<std::int32_t>::min)());
       }
       {
          std::string toml_input = "2147483647";
          std::int32_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::int32_t>::max());
+         expect(value == (std::numeric_limits<std::int32_t>::max)());
       }
       {
          std::string toml_input = "-2147483649";
@@ -894,13 +906,13 @@ arr = [4, 5, 6])";
          std::string toml_input = "0";
          std::uint32_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::uint32_t>::min());
+         expect(value == (std::numeric_limits<std::uint32_t>::min)());
       }
       {
          std::string toml_input = "4294967295";
          std::uint32_t value{};
          expect(not glz::read_toml(value, toml_input));
-         expect(value == std::numeric_limits<std::uint32_t>::max());
+         expect(value == (std::numeric_limits<std::uint32_t>::max)());
       }
       {
          std::string toml_input = "-1";
@@ -1063,6 +1075,22 @@ arr = [4, 5, 6])";
       expect(value[2] == 3);
       expect(value[3] == 4);
    };
+   "read_array_with_newlines"_test = [] {
+      std::string toml_input = R"([
+  1,
+  2,
+  3,
+  4
+])";
+      std::vector<int> value{};
+      const auto error = glz::read_toml(value, toml_input);
+      expect(not error) << glz::format_error(error, toml_input);
+      expect(value.size() == 4);
+      expect(value[0] == 1);
+      expect(value[1] == 2);
+      expect(value[2] == 3);
+      expect(value[3] == 4);
+   };
 
    "scalar_int"_test = [] {
       int i = 42;
@@ -1161,6 +1189,29 @@ y = "test2"
       expect(ac.inner_two.x == 12);
       expect(ac.inner_two.y == "test2");
       expect(ac.value == 5.6);
+   };
+
+   "read_deep_nested_struct_with_dot_notation"_test = [] {
+      deep_container dc{};
+      std::string_view toml_input{R"([nested.inner]
+x = 42
+)"};
+      auto error = glz::read_toml(dc, toml_input);
+      expect(!error) << glz::format_error(error, toml_input);
+      expect(dc.nested.inner.x == 42);
+   };
+
+   "read_deep_nested_struct_with_dot_notation_optional"_test = [] {
+      deep_container_optional dc{};
+      std::string_view toml_input{R"([nested2.inner]
+x = 42
+)"};
+      auto error = glz::read_toml(dc, toml_input);
+      expect(!error) << glz::format_error(error, toml_input);
+      expect(!dc.nested1.has_value());
+      expect(!dc.nested1.has_value());
+      expect(dc.nested2.has_value());
+      expect(dc.nested2->inner.x == 42);
    };
 
    "read_advanced_nested_struct"_test = [] {
@@ -2685,6 +2736,15 @@ struct catalog
    bool operator==(const catalog&) const = default;
 };
 
+struct catalog_wrapper
+{
+   catalog cat;
+};
+struct optional_catalog_wrapper
+{
+   std::optional<catalog> cat;
+};
+
 template <>
 struct glz::meta<catalog>
 {
@@ -2758,6 +2818,10 @@ struct simple_catalog
    std::vector<product> products{};
 
    bool operator==(const simple_catalog&) const = default;
+};
+struct opt_simple_catalog
+{
+   std::optional<std::vector<product>> products{};
 };
 
 template <>
@@ -2930,6 +2994,73 @@ sku = 284758393
       expect(c.products[1].sku == 0);
       expect(c.products[2].name == "Nail");
       expect(c.products[2].sku == 284758393);
+   };
+
+   "read_array_of_tables_nested"_test = [] {
+      std::string input = R"(
+[[cat.products]]
+name = "Hammer"
+sku = 738594937
+
+[[cat.products]]
+name = "Nail"
+sku = 284758393
+)";
+
+      catalog_wrapper c{};
+      auto ec = glz::read_toml(c, input);
+      expect(not ec) << glz::format_error(ec, input);
+
+      expect(c.cat.products.size() == 2);
+      expect(c.cat.products[0].name == "Hammer");
+      expect(c.cat.products[0].sku == 738594937);
+      expect(c.cat.products[1].name == "Nail");
+      expect(c.cat.products[1].sku == 284758393);
+   };
+
+   "read_array_of_tables_nested_optional"_test = [] {
+      std::string input = R"(
+[[cat.products]]
+name = "Hammer"
+sku = 738594937
+
+[[cat.products]]
+name = "Nail"
+sku = 284758393
+)";
+
+      optional_catalog_wrapper c{};
+      auto ec = glz::read_toml(c, input);
+      expect(not ec) << glz::format_error(ec, input);
+
+      expect(c.cat.has_value());
+      expect(c.cat->products.size() == 2);
+      expect(c.cat->products[0].name == "Hammer");
+      expect(c.cat->products[0].sku == 738594937);
+      expect(c.cat->products[1].name == "Nail");
+      expect(c.cat->products[1].sku == 284758393);
+   };
+
+   "read_array_of_optional_vector_array_table"_test = [] {
+      std::string input = R"([[products]]
+name = "Hammer"
+sku = 738594937
+
+[[products]]
+name = "Nail"
+sku = 284758393
+)";
+
+      opt_simple_catalog c{};
+      auto ec = glz::read_toml(c, input);
+      expect(not ec) << glz::format_error(ec, input);
+
+      expect(c.products.has_value());
+      expect(c.products->size() == 2);
+      expect((*c.products)[0].name == "Hammer");
+      expect((*c.products)[0].sku == 738594937);
+      expect((*c.products)[1].name == "Nail");
+      expect((*c.products)[1].sku == 284758393);
    };
 
    "write_nested_array_of_tables"_test = [] {
@@ -4877,7 +5008,7 @@ apple.taste.sweet = true
       std::int64_t i{};
       const auto int_error = glz::read_toml(i, "9223372036854775807");
       expect(not int_error);
-      expect(i == std::numeric_limits<std::int64_t>::max());
+      expect(i == (std::numeric_limits<std::int64_t>::max)());
 
       double d{};
       const auto float_error = glz::read_toml(d, "3.141592653589793");
@@ -5444,6 +5575,215 @@ count = 11)";
       expect(not err) << glz::format_error(err, input);
       expect(s.enable == false);
       expect(s.count == 11);
+   };
+};
+
+// A std::variant whose own meta opts into custom_read/custom_write (with full from/to
+// specializations) must not be ambiguous with the built-in TOML variant handler.
+// Parity with the JSON fix in #2591.
+struct toml_fc_a
+{};
+struct toml_fc_b
+{};
+using toml_fc_variant = std::variant<toml_fc_a, toml_fc_b>;
+
+template <>
+struct glz::meta<toml_fc_variant>
+{
+   static constexpr auto custom_read = true;
+   static constexpr auto custom_write = true;
+};
+
+template <uint32_t Format>
+struct glz::to<Format, toml_fc_variant>
+{
+   template <auto Opts>
+   static void op(auto&&, glz::is_context auto&& ctx, auto&&... args)
+   {
+      glz::serialize<Format>::template op<Opts>(42, ctx, args...);
+   }
+};
+
+suite toml_fully_custom_variant_tests = [] {
+   "fully custom variant specialization is unambiguous"_test = [] {
+      toml_fc_variant v{};
+      std::string s{};
+      expect(not glz::write_toml(v, s));
+      expect(s == "42") << s;
+   };
+};
+
+// Issue #2595: a field exposed through a transparent write wrapper - a mimic glaze_value_t
+// (meta whose value is a single member pointer) or a glz::custom getter/setter - must be laid
+// out by the shape it resolves to. A wrapped object gets a [table] body instead of malformed
+// multi-line `key = value` content in value position.
+namespace i2595
+{
+   struct leaf
+   {
+      std::string name{};
+      int id{};
+      bool operator==(const leaf&) const = default;
+   };
+
+   // mimic: meta value is a single member pointer, so this serializes exactly as `leaf`.
+   struct mimic_leaf
+   {
+      leaf v{};
+      bool operator==(const mimic_leaf&) const = default;
+   };
+   struct mimic_pair
+   {
+      mimic_leaf x{};
+      mimic_leaf y{};
+   };
+   struct mimic_doc
+   {
+      mimic_pair mid{};
+   };
+   // Plain equivalents used to confirm the wrapped output matches a plain field exactly.
+   struct plain_pair
+   {
+      leaf x{};
+      leaf y{};
+   };
+   struct plain_doc
+   {
+      plain_pair mid{};
+   };
+
+   // glz::custom getter/setter exposing a nested object.
+   struct custom_obj
+   {
+      leaf inner{};
+      const leaf& get_inner() const { return inner; }
+      void set_inner(leaf l) { inner = std::move(l); }
+      bool operator==(const custom_obj&) const = default;
+   };
+   struct plain_obj
+   {
+      leaf inner{};
+   };
+
+   // glz::custom getter/setter exposing a sequence of objects.
+   struct custom_seq
+   {
+      std::vector<leaf> items{};
+      const std::vector<leaf>& get_items() const { return items; }
+      void set_items(std::vector<leaf> v) { items = std::move(v); }
+      bool operator==(const custom_seq&) const = default;
+   };
+}
+
+template <>
+struct glz::meta<i2595::leaf>
+{
+   using T = i2595::leaf;
+   static constexpr auto value = object("name", &T::name, "id", &T::id);
+};
+template <>
+struct glz::meta<i2595::mimic_leaf>
+{
+   using mimic = i2595::leaf;
+   static constexpr auto value = &i2595::mimic_leaf::v;
+};
+template <>
+struct glz::meta<i2595::mimic_pair>
+{
+   using T = i2595::mimic_pair;
+   static constexpr auto value = object("x", &T::x, "y", &T::y);
+};
+template <>
+struct glz::meta<i2595::mimic_doc>
+{
+   using T = i2595::mimic_doc;
+   static constexpr auto value = object("mid", &T::mid);
+};
+template <>
+struct glz::meta<i2595::plain_pair>
+{
+   using T = i2595::plain_pair;
+   static constexpr auto value = object("x", &T::x, "y", &T::y);
+};
+template <>
+struct glz::meta<i2595::plain_doc>
+{
+   using T = i2595::plain_doc;
+   static constexpr auto value = object("mid", &T::mid);
+};
+template <>
+struct glz::meta<i2595::custom_obj>
+{
+   using T = i2595::custom_obj;
+   static constexpr auto value = object("inner", glz::custom<&T::set_inner, &T::get_inner>);
+};
+template <>
+struct glz::meta<i2595::plain_obj>
+{
+   using T = i2595::plain_obj;
+   static constexpr auto value = object("inner", &T::inner);
+};
+template <>
+struct glz::meta<i2595::custom_seq>
+{
+   using T = i2595::custom_seq;
+   static constexpr auto value = object("items", glz::custom<&T::set_items, &T::get_items>);
+};
+
+suite issue_2595_transparent_wrappers = [] {
+   using namespace i2595;
+
+   "mimic nested objects match plain layout"_test = [] {
+      mimic_doc w{};
+      w.mid.x.v = {"asdf", 123};
+      w.mid.y.v = {"qwer", 456};
+      plain_doc p{};
+      p.mid.x = {"asdf", 123};
+      p.mid.y = {"qwer", 456};
+
+      const auto ws = glz::write_toml(w);
+      const auto ps = glz::write_toml(p);
+      expect(ws.has_value());
+      expect(ps.has_value());
+      expect(ws.value() == ps.value()) << ws.value();
+
+      mimic_doc r{};
+      expect(not glz::read_toml(r, ws.value()));
+      expect(r.mid.x == w.mid.x);
+      expect(r.mid.y == w.mid.y);
+   };
+
+   "custom getter object matches plain layout"_test = [] {
+      custom_obj c{};
+      c.inner = {"asdf", 123};
+      plain_obj p{};
+      p.inner = {"asdf", 123};
+
+      const auto cs = glz::write_toml(c);
+      const auto ps = glz::write_toml(p);
+      expect(cs.has_value());
+      expect(ps.has_value());
+      expect(cs.value() == ps.value()) << cs.value();
+
+      custom_obj r{};
+      expect(not glz::read_toml(r, cs.value()));
+      expect(r == c);
+   };
+
+   // A wrapped sequence is emitted as a valid inline array rather than a [[array]] header: the
+   // TOML reader cannot feed a [[array]] section into a glz::custom setter, so inline keeps the
+   // output both valid and round-trippable.
+   "custom getter sequence is inline and round-trips"_test = [] {
+      custom_seq c{};
+      c.items = {{"a", 1}, {"b", 2}};
+
+      const auto cs = glz::write_toml(c);
+      expect(cs.has_value());
+      expect(cs.value() == R"(items = [{name = "a", id = 1}, {name = "b", id = 2}])") << cs.value();
+
+      custom_seq r{};
+      expect(not glz::read_toml(r, cs.value()));
+      expect(r == c);
    };
 };
 

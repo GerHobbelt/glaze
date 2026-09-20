@@ -24,6 +24,7 @@
 #include "glaze/ext/glaze_asio.hpp"
 #include "glaze/net/http_router.hpp"
 #include "glaze/util/env.hpp"
+#include "glaze/util/itoa.hpp"
 #include "glaze/util/key_transformers.hpp"
 
 #ifdef GLZ_ENABLE_SSL
@@ -257,34 +258,43 @@ namespace glz
       // buffer once, so the async chain (and retry) can share it without re-copying the
       // body or re-iterating the headers map. For large idempotent PUT bodies this is
       // the difference between O(1) and O(N) body copies per request through the chain.
-      inline std::string build_http_request_bytes(const std::string& method, const url_parts& url,
+      inline std::string build_http_request_bytes(const std::string& method, const url_parts& url, bool use_https,
                                                   const std::string& body,
                                                   const std::unordered_map<std::string, std::string>& headers)
       {
-         std::string s;
-         s.reserve(512 + body.size());
-         s.append(method);
-         s.append(" ");
-         s.append(url.path);
-         s.append(" HTTP/1.1\r\n");
-         s.append("Host: ");
-         s.append(url.host);
-         s.append("\r\n");
-         s.append("Connection: keep-alive\r\n");
+         const bool is_default_port = (!use_https && url.port == 80) || (use_https && url.port == 443);
+
+         std::string request_str;
+         request_str.reserve(512 + body.size());
+         request_str.append(method);
+         request_str.append(" ");
+         request_str.append(url.path);
+         request_str.append(" HTTP/1.1\r\n");
+         request_str.append("Host: ");
+         request_str.append(url.host);
+         if (!is_default_port) {
+            char
+               port_buf[8]; // a uint16_t port is at most 5 digits; pad so the sizing does not depend on itoa internals
+            auto* end = glz::to_chars(port_buf, url.port);
+            request_str.push_back(':');
+            request_str.append(port_buf, static_cast<size_t>(end - port_buf));
+         }
+         request_str.append("\r\n");
+         request_str.append("Connection: keep-alive\r\n");
          if (!body.empty()) {
-            s.append("Content-Length: ");
-            s.append(std::to_string(body.size()));
-            s.append("\r\n");
+            request_str.append("Content-Length: ");
+            request_str.append(std::to_string(body.size()));
+            request_str.append("\r\n");
          }
          for (const auto& [name, value] : headers) {
-            s.append(name);
-            s.append(": ");
-            s.append(value);
-            s.append("\r\n");
+            request_str.append(name);
+            request_str.append(": ");
+            request_str.append(value);
+            request_str.append("\r\n");
          }
-         s.append("\r\n");
-         s.append(body);
-         return s;
+         request_str.append("\r\n");
+         request_str.append(body);
+         return request_str;
       }
 
 #ifdef GLZ_ENABLE_SSL
@@ -461,7 +471,8 @@ namespace glz
             path = std::string(url.substr(port_end));
          }
 
-         if (!port_str.empty() && !std::all_of(port_str.begin(), port_str.end(), ::isdigit)) {
+         if (!port_str.empty() &&
+             !std::all_of(port_str.begin(), port_str.end(), [](unsigned char c) { return std::isdigit(c); })) {
             return std::unexpected(std::make_error_code(std::errc::invalid_argument));
          }
       }
@@ -962,7 +973,7 @@ namespace glz
        *
        * @note When using an external executor, no worker threads are created by start_workers().
        *       The caller is responsible for running the executor (e.g., calling io_context::run()
-       *       from their own threads) and to maintence its lifecycle.
+       *       from their own threads) and to maintain its lifecycle.
        *
        *
        * Example with internal io_context (handler is called from a different thread created by http_client):
@@ -978,7 +989,7 @@ namespace glz
        *				   });
        * @endcode
        *
-       * Example with external provied io_executor (handler runs in same thread which is calling io_ctx.run()).
+       * Example with external provided io_executor (handler runs in same thread which is calling io_ctx.run()).
        * io_context can be shared for other async operations:
        * @code
        *   // Create a shared io_context
@@ -1304,7 +1315,7 @@ namespace glz
          // don't start worker threads when an io_executor was provided
          if (!async_io_context) return;
 
-         size_t num_threads = std::max(2u, std::thread::hardware_concurrency());
+         size_t num_threads = (std::max)(2u, std::thread::hardware_concurrency());
          worker_threads.reserve(num_threads);
 
          for (size_t i = 0; i < num_threads; ++i) {
@@ -1499,35 +1510,10 @@ namespace glz
                                http_error_handler on_error, http_connect_handler on_connect,
                                http_disconnect_handler on_disconnect)
       {
-         std::string request_str;
-         request_str.reserve(512 + body.size());
+         const bool use_https = url.protocol == "https";
 
-         request_str.append(method);
-         request_str.append(" ");
-         request_str.append(url.path);
-         request_str.append(" HTTP/1.1\r\n");
-         request_str.append("Host: ");
-         request_str.append(url.host);
-         request_str.append("\r\n");
-         // Use keep-alive to allow the connection to be pooled
-         request_str.append("Connection: keep-alive\r\n");
-
-         if (!body.empty()) {
-            request_str.append("Content-Length: ");
-            request_str.append(std::to_string(body.size()));
-            request_str.append("\r\n");
-         }
-
-         for (const auto& [name, value] : headers) {
-            request_str.append(name);
-            request_str.append(": ");
-            request_str.append(value);
-            request_str.append("\r\n");
-         }
-         request_str.append("\r\n");
-         request_str.append(body);
-
-         auto request_buffer = std::make_shared<std::string>(std::move(request_str));
+         auto request_buffer =
+            std::make_shared<std::string>(detail::build_http_request_bytes(method, url, use_https, body, headers));
 
          std::visit(
             [&, this](auto& sock) {
@@ -1883,7 +1869,7 @@ namespace glz
 
          // Build the wire bytes once. If retry fires, the same bytes are written on
          // the fresh socket: no rebuild, no extra body copy.
-         const std::string request_str = detail::build_http_request_bytes(method, url, body, headers);
+         const std::string request_str = detail::build_http_request_bytes(method, url, use_https, body, headers);
 
          auto attempt = perform_sync_request_attempt(url, request_str, use_https, std::move(acquired.socket));
 
@@ -2175,7 +2161,7 @@ namespace glz
                }
 
                response_body.assign(static_cast<const char*>(response_buffer.data().data()),
-                                    std::min(content_length, response_buffer.size()));
+                                    (std::min)(content_length, response_buffer.size()));
             }
 
             response resp;
@@ -2226,7 +2212,7 @@ namespace glz
          // retry, and by every async lambda capture in the chain - those just bump the
          // shared_ptr refcount instead of copying the request body and header map.
          auto request_bytes =
-            std::make_shared<std::string>(detail::build_http_request_bytes(method, url, body, headers));
+            std::make_shared<std::string>(detail::build_http_request_bytes(method, url, use_https, body, headers));
 
          // Non-idempotent methods (POST, PATCH) are never retried because the client
          // cannot tell whether a write+read failure means the server already processed

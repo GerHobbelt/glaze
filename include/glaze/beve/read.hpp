@@ -532,6 +532,7 @@ namespace glz
    };
 
    template <is_variant T>
+      requires(not custom_read<T>)
    struct from<BEVE, T>
    {
       template <auto Opts>
@@ -917,9 +918,13 @@ namespace glz
             }
 
             ++it;
-            const auto n = int_from_compressed(ctx, it, end);
+            std::conditional_t<Opts.partial_read, size_t, const size_t> n = int_from_compressed(ctx, it, end);
             if (bool(ctx.error)) [[unlikely]] {
                return;
+            }
+
+            if constexpr (Opts.partial_read) {
+               n = value.size();
             }
 
             const auto num_bytes = (n + 7) / 8;
@@ -945,6 +950,12 @@ namespace glz
 
                if constexpr (check_shrink_to_fit(Opts)) {
                   value.shrink_to_fit();
+               }
+            }
+            else {
+               if (n > value.size()) {
+                  ctx.error = error_code::syntax_error;
+                  return;
                }
             }
 
@@ -1341,6 +1352,12 @@ namespace glz
 
                if constexpr (check_shrink_to_fit(Opts)) {
                   value.shrink_to_fit();
+               }
+            }
+            else {
+               if (n > value.size()) {
+                  ctx.error = error_code::syntax_error;
+                  return;
                }
             }
 

@@ -359,7 +359,7 @@ namespace glz
                return;
 
             // Range check: n must fit in T's positive range
-            constexpr auto max_val = static_cast<uint64_t>(std::numeric_limits<T>::max());
+            constexpr auto max_val = static_cast<uint64_t>((std::numeric_limits<T>::max)());
             if (n > max_val) [[unlikely]] {
                ctx.error = error_code::parse_number_failure;
                return;
@@ -373,7 +373,7 @@ namespace glz
 
             // CBOR negative value = -1 - n
             // For T's range [-2^(bits-1), 2^(bits-1)-1], max valid n = 2^(bits-1) - 1
-            constexpr auto max_n = static_cast<uint64_t>(std::numeric_limits<T>::max());
+            constexpr auto max_n = static_cast<uint64_t>((std::numeric_limits<T>::max)());
 
             if (n > max_n) [[unlikely]] {
                ctx.error = error_code::parse_number_failure;
@@ -1346,7 +1346,7 @@ namespace glz
          uint64_t n_keys;
          if (additional_info == info::indefinite) {
             // Handle indefinite map by counting as we go
-            n_keys = std::numeric_limits<uint64_t>::max();
+            n_keys = (std::numeric_limits<uint64_t>::max)();
          }
          else {
             n_keys = cbor_detail::decode_arg(ctx, it, end, additional_info);
@@ -1395,7 +1395,9 @@ namespace glz
             if constexpr (N > 0) {
                static constexpr auto HashInfo = hash_info<T>;
 
-               const auto index = decode_hash_with_size<CBOR, T, HashInfo, HashInfo.type>::op(it, end, key_len);
+               const auto index = key_len < HashInfo.min_length || key_len > HashInfo.max_length
+                                     ? N
+                                     : decode_hash_with_size<CBOR, T, HashInfo, HashInfo.type>::op(it, end, key_len);
 
                if (index < N) [[likely]] {
                   const sv key{reinterpret_cast<const char*>(it), static_cast<size_t>(key_len)};
@@ -1743,6 +1745,7 @@ namespace glz
 
    // Variants
    template <is_variant T>
+      requires(not custom_read<T>)
    struct from<CBOR, T>
    {
       template <auto Opts>

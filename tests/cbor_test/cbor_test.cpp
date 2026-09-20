@@ -29,6 +29,22 @@ struct my_struct
    std::array<uint64_t, 3> arr = {1, 2, 3};
 };
 
+struct cbor_mod4_object
+{
+   int x{};
+   int y{};
+   int z{};
+};
+
+struct cbor_front_hash_object
+{
+   int aaaa{};
+   int aaab{};
+   int aaba{};
+   int aabb{};
+   int abaa{};
+};
+
 template <>
 struct glz::meta<my_struct>
 {
@@ -463,7 +479,7 @@ void integer_tests()
    };
 
    "uint32_max"_test = [] {
-      uint32_t v = std::numeric_limits<uint32_t>::max();
+      uint32_t v = (std::numeric_limits<uint32_t>::max)();
       std::string buffer;
       expect(not glz::write_cbor(v, buffer));
       uint32_t result{};
@@ -472,7 +488,7 @@ void integer_tests()
    };
 
    "int64_min"_test = [] {
-      int64_t v = std::numeric_limits<int64_t>::min() + 1; // +1 to avoid overflow in CBOR
+      int64_t v = (std::numeric_limits<int64_t>::min)() + 1; // +1 to avoid overflow in CBOR
       std::string buffer;
       expect(not glz::write_cbor(v, buffer));
       int64_t result{};
@@ -2258,6 +2274,26 @@ void past_fuzzing_issues()
 
 void error_tests()
 {
+   const auto read_exact = []<class T, size_t N>(const std::array<uint8_t, N>& input) {
+      auto buffer = std::make_unique_for_overwrite<char[]>(N);
+      std::copy_n(reinterpret_cast<const char*>(input.data()), N, buffer.get());
+      T value{};
+      return glz::read_cbor(value, std::string_view{buffer.get(), N});
+   };
+
+   "empty object key stays within the buffer"_test = [=] {
+      static_assert(glz::hash_info<cbor_mod4_object>.type == glz::hash_type::mod4);
+      constexpr std::array<uint8_t, 3> input{0xa1, 0x60, 0x00};
+      expect(read_exact.template operator()<cbor_mod4_object>(input).ec == glz::error_code::unknown_key);
+   };
+
+   "short front hash key stays within the buffer"_test = [=] {
+      static_assert(glz::hash_info<cbor_front_hash_object>.type == glz::hash_type::front_hash);
+      static_assert(glz::hash_info<cbor_front_hash_object>.front_hash_bytes == 4);
+      constexpr std::array<uint8_t, 4> input{0xa1, 0x61, 'a', 0x00};
+      expect(read_exact.template operator()<cbor_front_hash_object>(input).ec == glz::error_code::unknown_key);
+   };
+
    "truncated_input"_test = [] {
       std::string buffer;
       buffer.push_back(static_cast<char>(glz::cbor::initial_byte(glz::cbor::major::uint, 24)));
@@ -3324,8 +3360,54 @@ void cbor_skip_marker_tests_run()
    };
 }
 
+// A std::variant whose own meta opts into custom_read/custom_write (with full from/to
+// specializations) must not be ambiguous with the built-in CBOR variant handlers.
+// Parity with the JSON fix in #2591.
+struct cbor_fc_a
+{};
+struct cbor_fc_b
+{};
+using cbor_fc_variant = std::variant<cbor_fc_a, cbor_fc_b>;
+
+template <>
+struct glz::meta<cbor_fc_variant>
+{
+   static constexpr auto custom_read = true;
+   static constexpr auto custom_write = true;
+};
+
+template <uint32_t Format>
+struct glz::from<Format, cbor_fc_variant>
+{
+   template <auto Opts>
+   static void op(cbor_fc_variant&, glz::is_context auto&&, auto&&, auto&&)
+   {}
+};
+
+template <uint32_t Format>
+struct glz::to<Format, cbor_fc_variant>
+{
+   template <auto Opts>
+   static void op(auto&&, glz::is_context auto&& ctx, auto&&... args)
+   {
+      glz::serialize<Format>::template op<Opts>(42, ctx, args...);
+   }
+};
+
+void custom_variant_ambiguity_tests()
+{
+   "fully custom variant specialization is unambiguous"_test = [] {
+      cbor_fc_variant v{};
+      std::string s{};
+      expect(not glz::write_cbor(v, s));
+      cbor_fc_variant r{};
+      expect(not glz::read_cbor(r, s));
+   };
+}
+
 int main()
 {
+   custom_variant_ambiguity_tests();
    basic_types_tests();
    integer_tests();
    float_tests();

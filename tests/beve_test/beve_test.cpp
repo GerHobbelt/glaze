@@ -6764,6 +6764,97 @@ suite beve_skip_marker_suite = [] {
    };
 };
 
+// A std::variant whose own meta opts into custom_read/custom_write (with full from/to
+// specializations) must not be ambiguous with the built-in BEVE variant handlers.
+// Parity with the JSON fix in #2591.
+struct beve_fc_a
+{};
+struct beve_fc_b
+{};
+using beve_fc_variant = std::variant<beve_fc_a, beve_fc_b>;
+
+template <>
+struct glz::meta<beve_fc_variant>
+{
+   static constexpr auto custom_read = true;
+   static constexpr auto custom_write = true;
+};
+
+template <uint32_t Format>
+struct glz::from<Format, beve_fc_variant>
+{
+   template <auto Opts>
+   static void op(beve_fc_variant&, glz::is_context auto&&, auto&&, auto&&)
+   {}
+};
+
+template <uint32_t Format>
+struct glz::to<Format, beve_fc_variant>
+{
+   template <auto Opts>
+   static void op(auto&&, glz::is_context auto&& ctx, auto&&... args)
+   {
+      glz::serialize<Format>::template op<Opts>(42, ctx, args...);
+   }
+};
+
+suite beve_fully_custom_variant_tests = [] {
+   "fully custom variant specialization is unambiguous"_test = [] {
+      beve_fc_variant v{};
+      std::string s{};
+      expect(not glz::write_beve(v, s));
+      beve_fc_variant r{};
+      expect(not glz::read_beve(r, s));
+   };
+};
+
+suite beve_fixed_array_bounds_tests = [] {
+   "beve fixed array rejects oversized complex typed array"_test = [] {
+      std::vector<std::complex<double>> src(8, std::complex<double>{1.0, 2.0});
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+      std::array<std::complex<double>, 2> dst{};
+      expect(bool(glz::read_beve(dst, buffer)));
+   };
+
+   "beve fixed array rejects oversized bool typed array"_test = [] {
+      std::vector<bool> src(64, true);
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+      std::array<bool, 2> dst{};
+      expect(bool(glz::read_beve(dst, buffer)));
+   };
+
+   "beve fixed bool array supports partial reads"_test = [] {
+      std::vector<bool> src{true, false, true, true, false, true, false, false};
+      std::string buffer{};
+      expect(not glz::write_beve(src, buffer));
+      std::array<bool, 2> dst{};
+      constexpr glz::opts partial{.format = glz::BEVE, .partial_read = true};
+      expect(not glz::read<partial>(dst, buffer));
+      expect(dst == std::array{true, false});
+   };
+
+   "beve fixed array exact-size typed arrays round trip"_test = [] {
+      {
+         std::array<std::complex<double>, 3> src{{{1, 2}, {3, 4}, {5, 6}}};
+         std::string buffer{};
+         expect(not glz::write_beve(src, buffer));
+         std::array<std::complex<double>, 3> dst{};
+         expect(not glz::read_beve(dst, buffer));
+         expect(src == dst);
+      }
+      {
+         std::array<bool, 5> src{true, false, true, true, false};
+         std::string buffer{};
+         expect(not glz::write_beve(src, buffer));
+         std::array<bool, 5> dst{};
+         expect(not glz::read_beve(dst, buffer));
+         expect(src == dst);
+      }
+   };
+};
+
 int main()
 {
    trace.begin("binary_test");
