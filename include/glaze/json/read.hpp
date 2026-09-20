@@ -1929,6 +1929,12 @@ namespace glz
 
          if (*it == '\\') [[unlikely]] {
             ++it;
+            if constexpr (not Opts.null_terminated) {
+               if (it == end) [[unlikely]] {
+                  ctx.error = error_code::unexpected_end;
+                  return;
+               }
+            }
             switch (*it) {
             case '\0': {
                ctx.error = error_code::unexpected_end;
@@ -2087,8 +2093,14 @@ namespace glz
 
             // Extract the string key
             const auto start = it;
-            while (*it != '"' && it != end) {
+            while (it != end && *it != '"') {
                ++it;
+            }
+            if constexpr (not Opts.null_terminated) {
+               if (it == end) [[unlikely]] {
+                  ctx.error = error_code::unexpected_end;
+                  return;
+               }
             }
             const sv key{start, static_cast<size_t>(it - start)};
             ++it; // skip closing quote
@@ -2549,11 +2561,25 @@ namespace glz
       if (bool(ctx.error)) [[unlikely]]
          return {};
 
+      if constexpr (not Opts.null_terminated) {
+         if (it == end) [[unlikely]] {
+            ctx.error = error_code::unexpected_end;
+            return {};
+         }
+      }
       if (*it == ']') [[unlikely]] {
          return 0;
       }
       size_t count = 1;
       while (true) {
+         // A null-terminated buffer falls out through the '\0' case below; a non-null-terminated
+         // buffer has no sentinel, so bound the scan here before dereferencing.
+         if constexpr (not Opts.null_terminated) {
+            if (it == end) [[unlikely]] {
+               ctx.error = error_code::unexpected_end;
+               return {};
+            }
+         }
          switch (*it) {
          case ',': {
             ++count;

@@ -161,21 +161,33 @@ namespace glz
 
          // Add custom headers
          for (const auto& [name, value] : headers) {
+            if (header_field_has_crlf(name, value)) [[unlikely]] {
+               continue;
+            }
             response_str.append(name);
             response_str.append(": ");
             response_str.append(value);
             response_str.append("\r\n");
          }
 
-         // Default headers for streaming
-         if (headers.find("transfer-encoding") == headers.end()) {
+         // Default headers for streaming. A control header that was dropped above
+         // for containing CR/LF must not suppress its auto-generated default: a
+         // dropped Transfer-Encoding/Connection would otherwise leave the stream
+         // unframed (no chunked framing, no keep-alive signal). Treat a
+         // present-but-invalid header as absent, matching what was written.
+         const auto present_and_valid = [&](const char* key) {
+            const auto it = headers.find(key);
+            return it != headers.end() && !header_field_has_crlf(it->first, it->second);
+         };
+
+         if (!present_and_valid("transfer-encoding")) {
             response_str.append("Transfer-Encoding: chunked\r\n");
             chunked_encoding_ = true;
          }
-         if (headers.find("connection") == headers.end()) {
+         if (!present_and_valid("connection")) {
             response_str.append("Connection: keep-alive\r\n");
          }
-         if (headers.find("cache-control") == headers.end()) {
+         if (!present_and_valid("cache-control")) {
             response_str.append("Cache-Control: no-cache\r\n");
          }
 
@@ -1762,6 +1774,18 @@ namespace glz
                return result;
             }
 
+            // RFC 7230 3.2.4: a header line beginning with SP/HTAB is obsolete line
+            // folding (obs-fold). Accepting it would store a continuation under a
+            // mangled key (e.g. "\ttransfer-encoding"), letting an obfuscated
+            // Transfer-Encoding/Content-Length slip past the header lookups that frame
+            // the body and desync this server from a folding-aware proxy (request
+            // smuggling). Reject with 400 and close.
+            if (data[pos] == ' ' || data[pos] == '\t') {
+               result.status = parse_status::error;
+               send_error_response_with_close(conn, 400, "Bad Request");
+               return result;
+            }
+
             // Find end of this header line
             size_t line_end = data.find("\r\n", pos);
             if (line_end == std::string_view::npos) return result; // incomplete
@@ -1771,10 +1795,32 @@ namespace glz
             auto colon_pos = line.find(':');
             if (colon_pos != std::string_view::npos) {
                std::string_view name_sv = line.substr(0, colon_pos);
+               // RFC 7230 3.2.4: no whitespace is allowed between the field-name and
+               // the colon. Tolerating it would store the name under a key with a
+               // trailing space/tab (e.g. "transfer-encoding ") that header lookups
+               // miss, so an obfuscated "Transfer-Encoding : chunked" would desync body
+               // framing (request smuggling). Reject with 400 and close.
+               if (!name_sv.empty() && (name_sv.back() == ' ' || name_sv.back() == '\t')) {
+                  result.status = parse_status::error;
+                  send_error_response_with_close(conn, 400, "Bad Request");
+                  return result;
+               }
                std::string_view value_sv = line.substr(colon_pos + 1);
                value_sv.remove_prefix((std::min)(value_sv.find_first_not_of(" \t"), value_sv.size()));
                std::string key(name_sv);
                for (auto& c : key) c = ascii_tolower(c);
+               // RFC 7230 3.3.2: multiple Content-Length fields with differing values make the
+               // body framing unrecoverable. The header map keeps last-wins, so a second
+               // Content-Length would silently override the first; a proxy that frames the body
+               // by the first value then desyncs from this server (CL.CL request smuggling).
+               // Reject with 400 and close. Identical repeats are tolerated.
+               if (key == "content-length") {
+                  if (auto existing = headers.find(key); existing != headers.end() && existing->second != value_sv) {
+                     result.status = parse_status::error;
+                     send_error_response_with_close(conn, 400, "Bad Request");
+                     return result;
+                  }
+               }
                headers[std::move(key)] = std::string(value_sv);
             }
 
@@ -1794,6 +1840,17 @@ namespace glz
 
          if (is_websocket_upgrade(headers)) {
             handle_websocket_upgrade_with_conn(std::move(conn));
+            return;
+         }
+
+         // Chunked request bodies are unsupported, so a request that carries
+         // Transfer-Encoding cannot be framed by Content-Length. Treating it as a
+         // zero-length body leaves the encoded payload in the buffer, where the
+         // keep-alive loop parses it as a second, smuggled request (TE/CL desync).
+         // RFC 7230 3.3.1 requires answering an undecodable Transfer-Encoding with
+         // 501 and closing the connection.
+         if (headers.find("transfer-encoding") != headers.end()) {
+            send_error_response_with_close(conn, 501, "Not Implemented");
             return;
          }
 
@@ -2158,6 +2215,9 @@ namespace glz
          }
 
          for (const auto& [name, value] : response.response_headers) {
+            if (header_field_has_crlf(name, value)) [[unlikely]] {
+               continue;
+            }
             h.append(name);
             h.append(": ");
             h.append(value);
