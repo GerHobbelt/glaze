@@ -136,7 +136,7 @@ class CertificateGenerator
       X509_gmtime_adj(X509_get_notAfter(x509), static_cast<long>(days) * 24 * 60 * 60);
       X509_set_pubkey(x509, pkey);
 
-      X509_NAME* name = X509_get_subject_name(x509);
+      X509_NAME* name = X509_NAME_new();
       X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("US"), -1, -1, 0);
       X509_NAME_add_entry_by_txt(name, "ST", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("Test"), -1, -1, 0);
       X509_NAME_add_entry_by_txt(name, "L", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("Test"), -1, -1, 0);
@@ -144,7 +144,9 @@ class CertificateGenerator
       X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(subject.c_str()), -1,
                                  -1, 0);
 
+      X509_set_subject_name(x509, name);
       X509_set_issuer_name(x509, name);
+      X509_NAME_free(name);
 
       if (subject == "localhost") {
          X509V3_CTX ctx;
@@ -448,15 +450,15 @@ suite https_client_tests = [] {
       glz::http_client client;
       client.set_ssl_verify_mode(asio::ssl::verify_none);
 
-      std::unordered_map<std::string, std::string> headers;
-      headers["X-Custom-Header"] = "CustomValue";
-      headers["Authorization"] = "Bearer test-token";
+      glz::http_headers headers;
+      headers.set("X-Custom-Header", "CustomValue");
+      headers.set("Authorization", "Bearer test-token");
 
       auto result = client.get(g_server.base_url() + "/headers", headers);
       expect(result.has_value()) << "HTTPS with custom headers should succeed";
       if (result.has_value()) {
          expect(result->status_code == 200);
-         expect(result->response_body.find("x-custom-header") != std::string::npos);
+         expect(result->response_body.find("X-Custom-Header") != std::string::npos);
       }
    };
 

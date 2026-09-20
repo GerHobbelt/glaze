@@ -126,6 +126,14 @@ namespace glz
    // If, after parsing a value, we want to validate the trailing whitespace
 
    // ---
+   // bool validate_utf8 = true;
+   // Validate that strings encountered while reading are well formed UTF-8, as RFC 8259 section 8.1
+   // requires. Malformed input fails with error_code::invalid_utf8. On by default: read input is by
+   // definition someone else's data, and accepting malformed encodings propagates them into your
+   // program. Turn it off only when the encoding is guaranteed by some earlier stage, or when the
+   // bytes are deliberately not UTF-8 and you accept what that means for your strings.
+
+   // ---
    // bool concatenate = true;
    // Concatenates ranges of std::pair into single objects when writing
 
@@ -184,6 +192,24 @@ namespace glz
    // bool skip_self_constraint = false;
    // Skip self_constraint validation during reading. Useful for performance when constraints are known to be valid
    // or when validation should be deferred.
+
+   // ---
+   // bool lazy_wide_number_skip = false;
+   // Speeds up skipping long numeric runs during lazy JSON traversal by escalating to a SWAR
+   // scan for the next structural byte once a number is still going after 8 bytes. Aimed at
+   // documents built from long numeric cells; on JSON with ordinary short numbers it costs a
+   // few percent, which is why it is off by default. Gains are largest for long numbers as array
+   // cells; long numbers as object values can lose ground, so measure before enabling.
+   // Has no effect unless null_terminated is also false - a null-terminated buffer stops on its
+   // own sentinel and takes the plain table walk regardless. See docs/lazy-json.md.
+
+   // ---
+   // bool lazy_streaming_cursor = false;
+   // Lets lazy JSON iteration skip re-scanning values it has already consumed. When a
+   // lazy_json_view::read_into fully consumes an element, or a nested container iterator runs to
+   // its close, the byte extent is recorded on the document and the next lazy_iterator advance
+   // jumps straight past it instead of re-scanning with skip_value_lazy. Costs two size_t on
+   // lazy_document when enabled and nothing at all when disabled. See docs/lazy-json.md.
 
    // ---
    // bool linear_search = false;
@@ -411,6 +437,16 @@ namespace glz
       }
       else {
          return false;
+      }
+   }
+
+   consteval bool check_validate_utf8(auto&& Opts)
+   {
+      if constexpr (requires { Opts.validate_utf8; }) {
+         return Opts.validate_utf8;
+      }
+      else {
+         return true;
       }
    }
 
@@ -711,6 +747,26 @@ namespace glz
    {
       if constexpr (requires { Opts.assume_sufficient_buffer; }) {
          return Opts.assume_sufficient_buffer;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval bool check_lazy_wide_number_skip(auto&& Opts)
+   {
+      if constexpr (requires { Opts.lazy_wide_number_skip; }) {
+         return Opts.lazy_wide_number_skip;
+      }
+      else {
+         return false;
+      }
+   }
+
+   consteval bool check_lazy_streaming_cursor(auto&& Opts)
+   {
+      if constexpr (requires { Opts.lazy_streaming_cursor; }) {
+         return Opts.lazy_streaming_cursor;
       }
       else {
          return false;

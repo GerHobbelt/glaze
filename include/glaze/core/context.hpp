@@ -107,9 +107,14 @@ namespace glz
       buffer_overflow, // Write would exceed fixed buffer capacity
       invalid_length, // Length exceeds allowed limit (buffer size or user-configured max)
       // Encoding errors
-      invalid_utf8, // Malformed UTF-8 in a string; always checked on read
+      invalid_utf8, // Malformed UTF-8 in a string; checked on read unless validate_utf8 is disabled
       // Streaming errors
-      streaming_unsupported // Document outruns the buffer window and this format's reader cannot refill
+      streaming_unsupported, // Document outruns the buffer window and this format's reader cannot refill
+      // Expansion errors
+      // A YAML read produced more text than its budgets allow. Both budgets bound the same thing
+      // -- text a small document can multiply into an unbounded amount -- and both call for the
+      // same response, so they share a code; custom_error_message names which one ran away.
+      exceeded_max_expansion
    };
 
    // Unified error context for all read/write operations

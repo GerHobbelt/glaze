@@ -1,10 +1,10 @@
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.31)
 
 include(cmake/prelude.cmake)
 
 project(
     glaze
-    VERSION 7.9.1
+    VERSION 8.0.0
     LANGUAGES CXX
 )
 
