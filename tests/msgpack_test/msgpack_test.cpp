@@ -1326,6 +1326,26 @@ suite msgpack_recursion_depth_limit = [] {
    };
 };
 
+suite msgpack_context_reuse = [] {
+   "a context reused after a failed read still reads"_test = [] {
+      static constexpr glz::opts options{.format = glz::MSGPACK};
+      const std::map<std::string, std::vector<std::vector<int>>> value{{"a", {{1, 2}, {3, 4}}}, {"b", {{5}}}};
+      std::string good{};
+      expect(not glz::write_msgpack(value, good));
+      const std::string bad = good.substr(0, good.size() / 2);
+
+      glz::context ctx{};
+      std::map<std::string, std::vector<std::vector<int>>> first{};
+      expect(bool(glz::read<options>(first, bad, ctx)));
+      expect(ctx.depth == 0u) << ctx.depth;
+
+      std::map<std::string, std::vector<std::vector<int>>> second{};
+      const auto ec = glz::read<options>(second, good, ctx);
+      expect(ec == glz::error_code::none) << glz::format_error(ec, good);
+      expect(second == value);
+   };
+};
+
 namespace local_aggregates
 {
    struct event
@@ -1348,6 +1368,60 @@ namespace local_aggregates
       std::vector<int> data = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
    };
 }
+
+struct mp_sentinel_pair
+{
+   int a{};
+   int b{};
+};
+
+struct mp_sentinel_pair_full
+{
+   int a{};
+   int b{};
+   int junk{};
+};
+
+struct mp_sentinel_custom_holder
+{
+   mp_sentinel_pair p{};
+   bool called = false;
+
+   void set(const mp_sentinel_pair& v)
+   {
+      p = v;
+      called = true;
+   }
+   const mp_sentinel_pair& get() const { return p; }
+};
+
+template <>
+struct glz::meta<mp_sentinel_custom_holder>
+{
+   using T = mp_sentinel_custom_holder;
+   static constexpr auto value = object("p", custom<&T::set, &T::get>);
+};
+
+struct mp_sentinel_custom_source
+{
+   mp_sentinel_pair_full p{};
+};
+
+suite msgpack_partial_read_sentinel_tests = [] {
+   // partial_read_complete stops the parse without failing it, so the setter must see the value
+   "custom setter receives a value that completed a partial read"_test = [] {
+      std::string buffer{};
+      expect(not glz::write_msgpack(mp_sentinel_custom_source{{1, 2, 3}}, buffer));
+
+      mp_sentinel_custom_holder h{};
+      static constexpr glz::opts partial_opts{
+         .format = glz::MSGPACK, .error_on_unknown_keys = false, .partial_read = true};
+      auto ec = glz::read<partial_opts>(h, buffer);
+      expect(not ec) << glz::format_error(ec, buffer);
+      expect(h.called);
+      expect(h.p.a == 1 && h.p.b == 2);
+   };
+};
 
 int main()
 {
