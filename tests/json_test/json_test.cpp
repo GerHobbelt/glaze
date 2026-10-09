@@ -2378,6 +2378,51 @@ suite json_pointer = [] {
       expect(b.has_value() && std::any_cast<std::string>(b) == thing.thing.b);
    };
 
+   // RFC 6901 section 4: array-index = %x30 / ( %x31-39 *(%x30-39) ), so a leading zero is not a
+   // valid index and must not resolve to the element it would name without it.
+   "seek rejects leading zero array indices"_test = [] {
+      std::vector<std::vector<int>> v{{1, 2, 3}, {4, 5, 6}};
+
+      int found{};
+      expect(glz::seek(
+         [&](auto&& val) {
+            if constexpr (std::same_as<std::remove_cvref_t<decltype(val)>, int>) {
+               found = val;
+            }
+         },
+         v, "/1/2"));
+      expect(found == 6);
+
+      expect(not glz::seek([](auto&&) {}, v, "/01/2"));
+      expect(not glz::seek([](auto&&) {}, v, "/1/02"));
+      expect(not glz::seek([](auto&&) {}, v, "/00/0"));
+
+      // The rest of the index grammar, which must keep behaving as it always has
+      for (const auto ptr :
+           {"/-/0", "/+1/0", "/ 1/0", "/1 /0", "//0", "/~01/0", "/1abc/0", "/99999999999999999999999/0"}) {
+         expect(not glz::seek([](auto&&) {}, v, ptr)) << ptr;
+      }
+   };
+
+   "get_view_json rejects leading zero array indices"_test = [] {
+      std::string buffer = R"({"items":[1,2,3,4,5,6,7,8,9,10,11]})";
+
+      auto view = glz::get_view_json<"/items/10">(buffer);
+      expect(view.has_value());
+      expect(glz::sv{view->data(), view->size()} == "11");
+
+      expect(not glz::get_view_json<"/items/00">(buffer).has_value());
+      expect(not glz::get_view_json<"/items/01">(buffer).has_value());
+      expect(not glz::get_view_json<"/items/010">(buffer).has_value());
+
+      // The runtime overload follows the same rule
+      expect(glz::get_view_json("/items/10", buffer).has_value());
+      expect(not glz::get_view_json("/items/00", buffer).has_value());
+      expect(not glz::get_view_json("/items/01", buffer).has_value());
+      expect(not glz::get_view_json("/items/010", buffer).has_value());
+      expect(not glz::get_view_json("/items/99999999999999999999999", buffer).has_value());
+   };
+
    "get"_test = [] {
       Thing thing{};
       expect(thing.thing.a == glz::get<double>(thing, "/thing_ptr/a"));
@@ -2440,6 +2485,9 @@ suite json_pointer = [] {
 
       static_assert(glz::valid<Thing, "/vec3/2", double>());
       static_assert(glz::valid<Thing, "/vec3/3", double>() == false);
+      // RFC 6901 section 4 forbids leading zeros in an array index
+      static_assert(glz::valid<Thing, "/vec3/02", double>() == false);
+      static_assert(glz::valid<Thing, "/vector/01", V3>() == false);
 
       static_assert(glz::valid<Thing, "/map/f", int>());
       static_assert(glz::valid<Thing, "/vector", std::vector<V3>>());
@@ -4263,6 +4311,82 @@ suite raw_json_tests = [] {
       std::string s = R"(12345678)";
       expect(not glz::read_json(v, s));
       expect(v.str == "12345678");
+   };
+};
+
+// An empty raw_json carries no JSON document, so the writer stands null in its place. Writing
+// nothing produced `{"payload":}` from a member that was simply never filled.
+struct raw_json_holder
+{
+   int id{};
+   glz::raw_json payload{};
+};
+
+struct raw_json_view_holder
+{
+   int id{};
+   glz::raw_json_view payload{};
+};
+
+suite empty_raw_json_tests = [] {
+   "empty raw_json member writes null"_test = [] {
+      raw_json_holder obj{};
+      std::string s{};
+      expect(not glz::write_json(obj, s));
+      expect(s == R"({"id":0,"payload":null})") << s;
+      expect(not glz::validate_json(s)) << s;
+   };
+
+   "empty raw_json_view member writes null"_test = [] {
+      raw_json_view_holder obj{};
+      std::string s{};
+      expect(not glz::write_json(obj, s));
+      expect(s == R"({"id":0,"payload":null})") << s;
+      expect(not glz::validate_json(s)) << s;
+   };
+
+   "raw_json cleared after being filled writes null"_test = [] {
+      raw_json_holder obj{42, R"({"a":1})"};
+      std::string s{};
+      expect(not glz::write_json(obj, s));
+      expect(s == R"({"id":42,"payload":{"a":1}})") << s;
+
+      obj.payload.str.clear();
+      s.clear();
+      expect(not glz::write_json(obj, s));
+      expect(s == R"({"id":42,"payload":null})") << s;
+   };
+
+   "empty raw_json is written as null at the top level"_test = [] {
+      expect(glz::write_json(glz::raw_json{}).value() == "null");
+      expect(glz::write_json(glz::raw_json_view{}).value() == "null");
+   };
+
+   "empty raw_json elements write null"_test = [] {
+      std::vector<glz::raw_json> v(3);
+      std::string s{};
+      expect(not glz::write_json(v, s));
+      expect(s == R"([null,null,null])") << s;
+   };
+
+   "empty raw_json prettifies as null"_test = [] {
+      raw_json_holder obj{};
+      std::string s{};
+      expect(not glz::write<glz::opts{.prettify = true}>(obj, s));
+      expect(s == "{\n   \"id\": 0,\n   \"payload\": null\n}") << s;
+   };
+
+   "the null stands only in the output, the member stays empty"_test = [] {
+      raw_json_holder obj{};
+      expect(obj.payload.str.empty());
+      std::string s{};
+      expect(not glz::write_json(obj, s));
+      expect(obj.payload.str.empty());
+
+      // Reading the written document back fills the member with the literal that was written.
+      raw_json_holder read{};
+      expect(not glz::read_json(read, s));
+      expect(read.payload.str == "null") << read.payload.str;
    };
 };
 
