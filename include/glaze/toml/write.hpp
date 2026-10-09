@@ -31,11 +31,6 @@ namespace glz
       constexpr explicit toml_opts(bool inline_arr) : opts{.format = TOML}, inline_arrays(inline_arr) {}
    };
 
-   // Skip member function pointers unless explicitly enabled
-   template <class T, auto Options>
-   constexpr bool skip_toml_field =
-      always_skipped<T> || (!check_write_function_pointers(Options) && is_member_function_pointer<T>);
-
    // TOML bare keys admit only [A-Za-z0-9_-]. A runtime map key holding any other
    // byte (a dot, whitespace, '=', a quote, a line break, an empty key) is not a
    // bare key: written verbatim it splices into the document, turning one entry
@@ -852,7 +847,7 @@ namespace glz
 
          using val_t = field_t<Type, I>;
 
-         if constexpr (!skip_toml_field<val_t, Options>) {
+         if constexpr (!skipped_on_write<Options, Type, I>) {
             // Check if nullable and null
             if constexpr (null_t<val_t>) {
                if constexpr (always_null_t<val_t>) {
@@ -879,6 +874,13 @@ namespace glz
                   if (is_null) {
                      return;
                   }
+               }
+            }
+            else if constexpr (custom_getter_returns_nullable<val_t>()) {
+               // See is_null_field in write_toml_object_with_path: a null glz::custom getter
+               // result leaves nothing to write, so the key is dropped.
+               if (is_custom_field_null<Type, I>(value, t, ctx)) {
+                  return;
                }
             }
 
@@ -1084,6 +1086,11 @@ namespace glz
                else
                   return !bool(get_member(value, element()));
             }
+         }
+         else if constexpr (custom_getter_returns_nullable<val_t>()) {
+            // A glz::custom getter yielding a null optional has nothing to put to the right of
+            // `=`, so the key is dropped exactly as a plain nullable field would be.
+            return is_custom_field_null<T, I>(value, t, ctx);
          }
          else { // else used to fix MSVC unreachable code warning
             return false;
@@ -1318,7 +1325,7 @@ namespace glz
          }
          using val_t = field_t<T, I>;
 
-         if constexpr (!skip_toml_field<val_t, Options>) {
+         if constexpr (!skipped_on_write<Options, T, I>) {
             // Skip null fields
             if (is_null_field.template operator()<I>()) {
                return;
@@ -1356,7 +1363,7 @@ namespace glz
          }
          using val_t = field_t<T, I>;
 
-         if constexpr (!skip_toml_field<val_t, Options>) {
+         if constexpr (!skipped_on_write<Options, T, I>) {
             // Skip null fields
             if (is_null_field.template operator()<I>()) {
                return;
