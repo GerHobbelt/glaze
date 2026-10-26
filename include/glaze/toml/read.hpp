@@ -710,7 +710,17 @@ namespace glz
                return;
             }
 
-            auto [ptr, ec] = glz::from_chars<false>(it, end, value); // Always treat as non-null-terminated
+            // TOML allows an explicit '+' sign on floats, which from_chars does not accept
+            auto start = it;
+            if (*start == '+') {
+               ++start;
+               if (start == end || *start == '+' || *start == '-') [[unlikely]] {
+                  ctx.error = error_code::parse_number_failure;
+                  return;
+               }
+            }
+
+            auto [ptr, ec] = glz::from_chars<false>(start, end, value); // Always treat as non-null-terminated
             if (ec != std::errc()) [[unlikely]] {
                ctx.error = error_code::parse_number_failure;
                return;
@@ -785,8 +795,8 @@ namespace glz
                   if (it + 2 >= end) {
                      break; // unterminated; reported by the check after the loop
                   }
-                  if (toml::forbidden_control_multiline_table[uint8_t(*it)] ||
-                      toml::is_bare_carriage_return(it, end)) [[unlikely]] {
+                  if (toml::forbidden_control_multiline_table[uint8_t(*it)] || toml::is_bare_carriage_return(it, end))
+                     [[unlikely]] {
                      ctx.error = error_code::invalid_control_character;
                      return;
                   }
@@ -874,8 +884,8 @@ namespace glz
                if (it + 2 >= end) {
                   break;
                }
-               if (toml::forbidden_control_multiline_table[uint8_t(*it)] ||
-                   toml::is_bare_carriage_return(it, end)) [[unlikely]] {
+               if (toml::forbidden_control_multiline_table[uint8_t(*it)] || toml::is_bare_carriage_return(it, end))
+                  [[unlikely]] {
                   ctx.error = error_code::invalid_control_character;
                   return;
                }
