@@ -1,12 +1,19 @@
 #include "glaze/net/http_client.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <condition_variable>
 #include <future>
+#include <initializer_list>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <random>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -1555,6 +1562,248 @@ class host_header_server
    std::thread server_thread_;
    uint16_t port_{0};
    std::string host_header_;
+};
+
+// Answers every request with `reply`, which may be empty, then sends nothing, holding the
+// connection open until the client closes it or `stall` passes.
+class stalling_server
+{
+  public:
+   stalling_server(std::string reply, std::chrono::milliseconds stall) : reply_(std::move(reply)), stall_(stall) {}
+   ~stalling_server() { stop(); }
+
+   bool start()
+   {
+      try {
+         acceptor_ = std::make_unique<asio::ip::tcp::acceptor>(
+            io_, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+         port_ = acceptor_->local_endpoint().port();
+         accept();
+         server_thread_ = std::thread([this]() { io_.run(); });
+         return true;
+      }
+      catch (...) {
+         return false;
+      }
+   }
+
+   void stop()
+   {
+      io_.stop();
+      if (server_thread_.joinable()) server_thread_.join();
+   }
+
+   std::string base_url() const { return "http://127.0.0.1:" + std::to_string(port_); }
+
+  private:
+   void accept()
+   {
+      acceptor_->async_accept([this](asio::error_code ec, asio::ip::tcp::socket socket) {
+         if (ec) return;
+         serve(std::make_shared<asio::ip::tcp::socket>(std::move(socket)));
+         accept();
+      });
+   }
+
+   void serve(std::shared_ptr<asio::ip::tcp::socket> socket)
+   {
+      auto request = std::make_shared<asio::streambuf>();
+      asio::async_read_until(*socket, *request, "\r\n\r\n", [this, socket, request](asio::error_code ec, std::size_t) {
+         if (ec) return;
+         asio::async_write(*socket, asio::buffer(reply_), [this, socket](asio::error_code ec, std::size_t) {
+            if (ec) return;
+            // The client's close or the end of the stall, whichever comes first, closes the socket.
+            auto timer = std::make_shared<asio::steady_timer>(io_, stall_);
+            timer->async_wait([socket, timer](asio::error_code) {
+               asio::error_code ignored;
+               socket->close(ignored);
+            });
+            auto sink = std::make_shared<std::array<char, 64>>();
+            socket->async_read_some(asio::buffer(*sink),
+                                    [timer, sink](asio::error_code, std::size_t) { timer->cancel(); });
+         });
+      });
+   }
+
+   std::string reply_;
+   std::chrono::milliseconds stall_;
+   asio::io_context io_;
+   std::unique_ptr<asio::ip::tcp::acceptor> acceptor_;
+   std::thread server_thread_;
+   uint16_t port_{0};
+};
+
+// Records how a stream ends, for tests that count its error and disconnect reports.
+struct stream_end_log
+{
+   std::mutex mutex;
+   std::condition_variable ended;
+   std::vector<std::error_code> errors;
+   int disconnects{};
+   bool error_after_disconnect{};
+
+   glz::http_error_handler on_error()
+   {
+      return [this](std::error_code ec) {
+         std::lock_guard lock(mutex);
+         errors.push_back(ec);
+         error_after_disconnect |= disconnects > 0;
+      };
+   }
+
+   glz::http_disconnect_handler on_disconnect()
+   {
+      return [this] {
+         {
+            std::lock_guard lock(mutex);
+            ++disconnects;
+         }
+         ended.notify_all();
+      };
+   }
+
+   bool wait_for_end(std::chrono::steady_clock::duration timeout)
+   {
+      std::unique_lock lock(mutex);
+      return ended.wait_for(lock, timeout, [&] { return disconnects > 0; });
+   }
+
+   // One error, one of `allowed`, reported before the stream's one on_disconnect.
+   void expect_one_end(std::initializer_list<std::error_code> allowed)
+   {
+      std::lock_guard lock(mutex);
+      expect(disconnects == 1) << "on_disconnect ran " << disconnects << " times";
+      expect(errors.size() == 1) << "on_error ran " << errors.size() << " times";
+      for (const auto& ec : errors) {
+         expect(std::find(allowed.begin(), allowed.end(), ec) != allowed.end()) << "unexpected error: " << ec.message();
+      }
+      expect(!error_after_disconnect) << "on_error ran after on_disconnect";
+   }
+};
+
+suite stream_disconnect_tests = [] {
+   // disconnect() called from a thread other than the client's workers, a few microseconds after
+   // the first chunk is delivered, while a worker moves on to the next read. The server then
+   // stalls, so a stop the client loses holds the stream until the server gives up, while one it
+   // honours ends the stream at once. A stop that races the client's own close of the socket
+   // crashes under AddressSanitizer when the two are not ordered.
+   "disconnect_from_another_thread_ends_a_stalled_chunked_stream"_test = [] {
+      constexpr auto stall = std::chrono::milliseconds(1000);
+      stalling_server server{
+         "HTTP/1.1 200 OK\r\n"
+         "Transfer-Encoding: chunked\r\n"
+         "\r\n"
+         "5\r\nhello\r\n",
+         stall};
+      expect(server.start()) << "Stalling server should start";
+
+      glz::http_client client;
+      std::mt19937 random{3021};
+      std::uniform_int_distribution<int> spin_us{0, 20};
+      const auto spin_for = [](std::chrono::steady_clock::duration span, const std::atomic<bool>* until_set) {
+         const auto deadline = std::chrono::steady_clock::now() + span;
+         while (std::chrono::steady_clock::now() < deadline) {
+            if (until_set && until_set->load()) return true;
+         }
+         return until_set == nullptr;
+      };
+
+      // Each lost stop costs a stall, so a failing run stops counting at a handful.
+      constexpr int rounds = 200;
+      constexpr int enough_lost = 5;
+      int ran = 0;
+      int lost = 0;
+      for (; ran < rounds && lost < enough_lost; ++ran) {
+         std::atomic<bool> delivered = false;
+         std::atomic<bool> released = false;
+         std::promise<void> disconnect_promise;
+         auto disconnect_future = disconnect_promise.get_future();
+
+         auto conn = client.stream_request_v2({.url = server.base_url() + "/stall",
+                                               .body = {},
+                                               .headers = {},
+                                               .on_data =
+                                                  [&](std::string_view) {
+                                                     // Hold the worker until the test thread is running, so
+                                                     // the stop below lands as the worker takes its next step.
+                                                     delivered = true;
+                                                     spin_for(std::chrono::seconds(5), &released);
+                                                  },
+                                               .on_error = [](std::error_code) {},
+                                               .on_progress = {},
+                                               .on_connect = {},
+                                               .on_disconnect = [&] { disconnect_promise.set_value(); }});
+         expect(conn != nullptr);
+         if (!conn || !spin_for(std::chrono::seconds(5), &delivered)) {
+            expect(false) << "The first chunk did not arrive";
+            break;
+         }
+
+         released = true;
+         spin_for(std::chrono::microseconds(spin_us(random)), nullptr);
+         conn->disconnect();
+
+         if (disconnect_future.wait_for(stall / 2) != std::future_status::ready) {
+            ++lost;
+         }
+         // A lost stop still ends when the server closes, so the next round starts on a clean slate.
+         if (disconnect_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            expect(false) << "The stream never ended";
+            break;
+         }
+      }
+
+      expect(ran == rounds && lost == 0) << lost << " stops were lost in " << ran << " rounds";
+      server.stop();
+   };
+
+   // The timeout cancels the pending read of the head. The stream must still end once: one
+   // timed_out, then one on_disconnect, and no operation_aborted from the cancelled read.
+   "timeout_before_head_ends_the_stream_once"_test = [] {
+      stalling_server server{"", std::chrono::milliseconds(3000)};
+      expect(server.start()) << "Stalling server should start";
+
+      stream_end_log log; // outlives the client, whose workers run its handlers
+      glz::http_client client;
+      auto conn = client.stream_request_v2({.url = server.base_url() + "/silent",
+                                            .timeout = std::chrono::seconds(1),
+                                            .on_data = [](std::string_view) {},
+                                            .on_error = log.on_error(),
+                                            .on_disconnect = log.on_disconnect()});
+      expect(conn != nullptr);
+
+      expect(log.wait_for_end(std::chrono::seconds(5))) << "The stream never ended";
+      std::this_thread::sleep_for(std::chrono::milliseconds(300)); // room for a second report
+      log.expect_one_end({std::make_error_code(std::errc::timed_out)});
+      server.stop();
+   };
+
+   // A stream that fails before its head arrives ends there, and its timeout must not report it
+   // a second time once the timer runs out.
+   "refused_connect_is_not_reported_again_by_the_timeout"_test = [] {
+      // A bound socket that never listens refuses connections and keeps the port from being reused.
+      asio::io_context io;
+      asio::ip::tcp::socket closed{io};
+      closed.open(asio::ip::tcp::v4());
+      closed.bind(asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+      const uint16_t closed_port = closed.local_endpoint().port();
+
+      stream_end_log log; // outlives the client, whose workers run its handlers
+      glz::http_client client;
+      auto conn = client.stream_request_v2({.url = "http://127.0.0.1:" + std::to_string(closed_port) + "/",
+                                            .timeout = std::chrono::seconds(1),
+                                            .on_data = [](std::string_view) {},
+                                            .on_error = log.on_error(),
+                                            .on_disconnect = log.on_disconnect()});
+      expect(conn != nullptr);
+
+      expect(log.wait_for_end(std::chrono::seconds(5))) << "The stream never ended";
+      std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // past the timeout
+      // Windows retries a refused loopback connect for about two seconds, so there the timeout
+      // may end the stream first. Either way it ends once.
+      log.expect_one_end(
+         {make_error_code(asio::error::connection_refused), std::make_error_code(std::errc::timed_out)});
+   };
 };
 
 suite eof_delimited_tests = [] {
