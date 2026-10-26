@@ -755,22 +755,19 @@ namespace glz
                      ctx.error = error_code::unexpected_end;
                      return;
                   }
-                  // Escaped newline continuation in multiline basic strings
-                  if (*it == '\n') {
-                     // Trim all whitespace after escaped newline until non-whitespace or actual newline
-                     while (it + 1 < end &&
-                            (*(it + 1) == ' ' || *(it + 1) == '\t' || *(it + 1) == '\r' || *(it + 1) == '\n')) {
-                        ++it;
-                        if (*it == '\n') break; // Stop if we hit an actual newline
-                     }
+                  // Line ending backslash: optional spaces or tabs, then a newline. The
+                  // backslash and all whitespace, newlines included, up to the next
+                  // non-whitespace character are trimmed.
+                  auto ws = it;
+                  while (ws < end && (*ws == ' ' || *ws == '\t')) {
+                     ++ws;
                   }
-                  else if (*it == '\r') { // part of CRLF, handle similar to \n
-                     if (it + 1 < end && *(it + 1) == '\n') ++it;
-                     while (it + 1 < end &&
-                            (*(it + 1) == ' ' || *(it + 1) == '\t' || *(it + 1) == '\r' || *(it + 1) == '\n')) {
-                        ++it;
-                        if (*it == '\n') break;
+                  if (ws < end && (*ws == '\n' || (*ws == '\r' && ws + 1 < end && *(ws + 1) == '\n'))) {
+                     while (ws + 1 < end && (*(ws + 1) == ' ' || *(ws + 1) == '\t' || *(ws + 1) == '\n' ||
+                                             (*(ws + 1) == '\r' && ws + 2 < end && *(ws + 2) == '\n'))) {
+                        ++ws;
                      }
+                     it = ws; // the ++it below steps past the trimmed whitespace
                   }
                   else if (!append_toml_basic_escape(value, it, end)) {
                      ctx.error = error_code::syntax_error;
@@ -788,17 +785,23 @@ namespace glz
                   if (it + 2 >= end) {
                      break; // unterminated; reported by the check after the loop
                   }
-                  if (toml::forbidden_control_multiline_table[uint8_t(*it)]) [[unlikely]] {
+                  if (toml::forbidden_control_multiline_table[uint8_t(*it)] ||
+                      toml::is_bare_carriage_return(it, end)) [[unlikely]] {
                      ctx.error = error_code::invalid_control_character;
                      return;
                   }
                   if (*it == '\\') {
                      continue; // hand the escape back to the branch above
                   }
-                  if (*(it + 1) == '"' && *(it + 2) == '"') {
+                  if (*it == '\r') {
+                     value.push_back('\r'); // a CRLF line ending; the line feed joins the next run
+                  }
+                  else if (*(it + 1) == '"' && *(it + 2) == '"') {
                      break; // closing delimiter
                   }
-                  value.push_back('"'); // a lone quote inside the string
+                  else {
+                     value.push_back('"'); // a lone quote inside the string
+                  }
                }
                ++it;
             }
@@ -871,14 +874,15 @@ namespace glz
                if (it + 2 >= end) {
                   break;
                }
-               if (toml::forbidden_control_multiline_table[uint8_t(*it)]) [[unlikely]] {
+               if (toml::forbidden_control_multiline_table[uint8_t(*it)] ||
+                   toml::is_bare_carriage_return(it, end)) [[unlikely]] {
                   ctx.error = error_code::invalid_control_character;
                   return;
                }
-               if (*(it + 1) == '\'' && *(it + 2) == '\'') {
+               if (*it == '\'' && *(it + 1) == '\'' && *(it + 2) == '\'') {
                   break; // closing delimiter
                }
-               value.push_back(*it); // a lone quote inside the string
+               value.push_back(*it); // a lone quote, or the carriage return of a CRLF line ending
                ++it;
             }
 
@@ -1747,6 +1751,9 @@ namespace glz
 
             if (*it == '\n' || *it == '\r') {
                skip_to_next_line(ctx, it, end);
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
                continue;
             }
 
@@ -2447,6 +2454,9 @@ namespace glz
 
             if (*it == '\n' || *it == '\r') {
                skip_to_next_line(ctx, it, end);
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
                continue;
             }
 
@@ -2534,6 +2544,9 @@ namespace glz
             }
             if (*it == '\n' || *it == '\r') {
                skip_to_next_line(ctx, it, end);
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
                continue;
             }
 
@@ -2648,6 +2661,9 @@ namespace glz
             }
             if (*it == '\n' || *it == '\r') {
                skip_to_next_line(ctx, it, end);
+               if (bool(ctx.error)) [[unlikely]] {
+                  return;
+               }
                continue;
             }
 
@@ -2884,9 +2900,6 @@ namespace glz
       template <class T>
       concept toml_variant_object_type = (glz::glaze_object_t<T> || glz::reflectable<T> || glz::writable_map_t<T>);
 
-      template <class T>
-      concept toml_variant_null_type = glz::null_t<T>;
-
       // Type trait wrappers for template use
       template <class T>
       struct is_toml_variant_bool : std::bool_constant<toml_variant_bool_type<T>>
@@ -2911,9 +2924,6 @@ namespace glz
       {};
       template <class T>
       struct is_toml_variant_object : std::bool_constant<toml_variant_object_type<T>>
-      {};
-      template <class T>
-      struct is_toml_variant_null : std::bool_constant<toml_variant_null_type<T>>
       {};
 
       // Count types in variant matching a trait
@@ -3358,10 +3368,10 @@ namespace glz
          else {
             // Identifiers (a-z, A-Z, _) at document root indicate key-value pairs
             // Check if the variant has a map alternative we can use
-            const bool is_identifier = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
             constexpr auto map_idx = detail::find_map_alternative_index<Variant>();
 
             if constexpr (map_idx != std::variant_npos) {
+               const bool is_identifier = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
                if (is_identifier) {
                   // Parse as a TOML document with key-value pairs into the map alternative
                   using V = std::variant_alternative_t<map_idx, Variant>;
@@ -3373,18 +3383,12 @@ namespace glz
                }
             }
 
-            // Unknown type - could be null or invalid
-            constexpr auto null_count = detail::toml_variant_count_v<Variant, detail::is_toml_variant_null>;
-            if constexpr (null_count > 0) {
-               // Try to parse as null (for std::nullptr_t or similar)
-               constexpr auto idx = detail::toml_variant_first_index_v<Variant, detail::is_toml_variant_null>;
-               value.template emplace<idx>();
-               // Note: TOML doesn't have a native null, so this may fail unless
-               // custom handling is provided
-            }
-            else {
-               ctx.error = error_code::syntax_error;
-            }
+            // TOML has no null, so a byte that starts no TOML value is a syntax error even when
+            // the variant has a null alternative. Emplacing null here without consuming anything
+            // accepted documents every conforming parser rejects -- a key with nothing after its
+            // equals (`a =` ending the line, `a = # comment`), an inline-table member with no
+            // value ({u = }), and an empty array element ([1, , 2]) -- all reported as success.
+            ctx.error = error_code::syntax_error;
          }
       }
    };

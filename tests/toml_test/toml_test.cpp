@@ -6192,6 +6192,35 @@ suite toml_control_character_reader_tests = [] {
       expect(obj.v == "a\nb");
    };
 
+   // A carriage return is legal in a multiline string only as the start of CRLF.
+   "multiline strings keep CRLF line endings"_test = [] {
+      control_value_t obj{};
+      expect(not glz::read_toml(obj, "v = \"\"\"a\r\nb\r\n\"\"\""));
+      expect(obj.v == "a\r\nb\r\n");
+      expect(not glz::read_toml(obj, "v = '''a\r\nb\r\n'''"));
+      expect(obj.v == "a\r\nb\r\n");
+   };
+
+   "multiline basic string rejects bare carriage return"_test = [] {
+      control_value_t obj{};
+      expect(glz::read_toml(obj, "v = \"\"\"a\rb\"\"\"") == glz::error_code::invalid_control_character);
+      expect(glz::read_toml(obj, "v = \"\"\"a\r\"\"\"") == glz::error_code::invalid_control_character);
+      expect(glz::read_toml(obj, "v = \"\"\"a\r\r\nb\"\"\"") == glz::error_code::invalid_control_character);
+   };
+
+   "multiline literal string rejects bare carriage return"_test = [] {
+      control_value_t obj{};
+      expect(glz::read_toml(obj, "v = '''a\rb'''") == glz::error_code::invalid_control_character);
+      expect(glz::read_toml(obj, "v = '''a\r'''") == glz::error_code::invalid_control_character);
+      expect(glz::read_toml(obj, "v = '''a\r\r\nb'''") == glz::error_code::invalid_control_character);
+   };
+
+   "line ending backslash does not admit a bare carriage return"_test = [] {
+      control_value_t obj{};
+      expect(bool(glz::read_toml(obj, "v = \"\"\"a\\\rb\"\"\"")));
+      expect(glz::read_toml(obj, "v = \"\"\"a\\\n\r b\"\"\"") == glz::error_code::invalid_control_character);
+   };
+
    // The scans now run as bulk runs broken by a dispatch table, so the cases that
    // make a run stop without ending the string need to keep working.
    "quotes inside multiline strings survive the scan"_test = [] {
@@ -6206,6 +6235,101 @@ suite toml_control_character_reader_tests = [] {
       expect(obj.v == "ab");
       expect(not glz::read_toml(obj, "v = \"a\\tb\\u0041\""));
       expect(obj.v == "a\tbA");
+   };
+};
+
+suite toml_skipped_string_line_endings = [] {
+   static constexpr glz::opts skip_unknown{.format = glz::TOML, .error_on_unknown_keys = false};
+
+   "skipped multiline strings keep CRLF line endings"_test = [] {
+      control_value_t obj{};
+      expect(not glz::read<skip_unknown>(obj, "u = \"\"\"a\r\nb\\\r\n  c\"\"\"\nv = \"x\""));
+      expect(obj.v == "x");
+      expect(not glz::read<skip_unknown>(obj, "u = '''a\r\nb'''\nv = \"y\""));
+      expect(obj.v == "y");
+   };
+
+   "skipped multiline strings reject bare carriage return"_test = [] {
+      control_value_t obj{};
+      expect(glz::read<skip_unknown>(obj, "u = \"\"\"a\rb\"\"\"\nv = \"x\"") ==
+             glz::error_code::invalid_control_character);
+      expect(glz::read<skip_unknown>(obj, "u = '''a\rb'''\nv = \"x\"") == glz::error_code::invalid_control_character);
+      expect(glz::read<skip_unknown>(obj, "u = \"\"\"a\\\rb\"\"\"\nv = \"x\"") ==
+             glz::error_code::invalid_control_character);
+   };
+
+   "skipped single-line string rejects an escaped line break"_test = [] {
+      control_value_t obj{};
+      expect(bool(glz::read<skip_unknown>(obj, "u = \"a\\\nb\"\nv = \"x\"")));
+      expect(bool(glz::read<skip_unknown>(obj, "u = \"a\\\rb\"\nv = \"x\"")));
+   };
+
+   "skipped strings step over escaped quotes and backslashes"_test = [] {
+      control_value_t obj{};
+      expect(not glz::read<skip_unknown>(obj, "u = \"a\\\"b\"\nv = \"x\""));
+      expect(obj.v == "x");
+      expect(not glz::read<skip_unknown>(obj, "u = \"a\\\\\"\nv = \"y\""));
+      expect(obj.v == "y");
+      expect(not glz::read<skip_unknown>(obj, "u = \"\"\"a\\\"\"\" b\"\"\"\nv = \"z\""));
+      expect(obj.v == "z");
+      expect(not glz::read<skip_unknown>(obj, "u = \"\"\"a\\\\\"\"\"\nv = \"w\""));
+      expect(obj.v == "w");
+   };
+};
+
+struct line_ending_pair_t
+{
+   int a{};
+   int b{};
+};
+
+struct line_ending_doc_t
+{
+   line_ending_pair_t t{};
+   std::vector<int> v{};
+};
+
+// A TOML newline is LF or CRLF. A carriage return without a line feed after it is not a
+// line ending anywhere in a document.
+suite toml_document_line_endings = [] {
+   "CRLF line endings are accepted throughout a document"_test = [] {
+      line_ending_doc_t doc{};
+      const std::string input = "# c\r\nv = [\r\n1, # d\r\n2\r\n]\r\n[t]\r\na = 1 # e\r\nb = 2\r\n";
+      const auto error = glz::read_toml(doc, input);
+      expect(not error) << glz::format_error(error, input);
+      expect(doc.v == std::vector<int>{1, 2});
+      expect(doc.t.a == 1);
+      expect(doc.t.b == 2);
+   };
+
+   "bare carriage return is not a line ending"_test = [] {
+      line_ending_pair_t pair{};
+      expect(glz::read_toml(pair, "a = 1\rb = 2") == glz::error_code::syntax_error);
+      expect(glz::read_toml(pair, "a = 1 # c\rb = 2") == glz::error_code::syntax_error);
+      expect(glz::read_toml(pair, "\ra = 1\nb = 2") == glz::error_code::syntax_error);
+      expect(glz::read_toml(pair, "a = 1\r") == glz::error_code::syntax_error);
+
+      line_ending_doc_t doc{};
+      expect(glz::read_toml(doc, "[t]\ra = 1") == glz::error_code::syntax_error);
+      expect(bool(glz::read_toml(doc, "v = [1,\r2]")));
+      expect(bool(glz::read_toml(doc, "v = [1, # c\r2]")));
+
+      std::map<std::string, int> map{};
+      expect(glz::read_toml(map, "a = 1\rb = 2") == glz::error_code::syntax_error);
+
+      glz::generic generic{};
+      expect(glz::read_toml(generic, "a = 1\rb = 2") == glz::error_code::syntax_error);
+      expect(glz::read_toml(generic, "[t]\ra = 1") == glz::error_code::syntax_error);
+   };
+
+   "skipped values reject a bare carriage return"_test = [] {
+      static constexpr glz::opts skip_unknown{.format = glz::TOML, .error_on_unknown_keys = false};
+      control_value_t obj{};
+      expect(not glz::read<skip_unknown>(obj, "u = [1,\r\n2]\r\nw = 3\r\nv = \"x\"\r\n[u2]\r\nk = 1\r\n"));
+      expect(obj.v == "x");
+      expect(glz::read<skip_unknown>(obj, "u = [1,\r2]\nv = \"x\"") == glz::error_code::syntax_error);
+      expect(glz::read<skip_unknown>(obj, "u = 1\rv = \"x\"") == glz::error_code::syntax_error);
+      expect(glz::read<skip_unknown>(obj, "[u]\rk = 1") == glz::error_code::syntax_error);
    };
 };
 
@@ -6300,6 +6424,132 @@ suite toml_control_character_writer_tests = [] {
    };
 };
 
+// TOML has no null. A null value must not corrupt the structure written around it: a struct
+// field or map entry whose value is null (an empty nullable, or a nullable, variant, or
+// glz::generic holding null) is dropped, key and all. A null with no key to drop is either the
+// null alternative of a variant, written as the "" placeholder the std::nullptr_t writer
+// documents so it reads back into glz::generic, or an empty typed nullable in an array or tuple
+// slot, which fails the write rather than produce output that cannot be read back. The reader
+// in turn must not invent a null from a value that is not there (`a =` ending the line,
+// `{u = }`, `[1, , 2]`), which every conforming parser rejects.
+struct toml_null_fields
+{
+   int a{};
+   glz::generic g{};
+   std::variant<std::monostate, int> v{};
+   std::optional<std::optional<int>> nested{std::optional<int>{}};
+};
+
+suite toml_null_value_tests = [] {
+   "map entry with empty optional is dropped"_test = [] {
+      std::map<std::string, std::optional<int>> m{{"x", std::nullopt}, {"y", 2}};
+      std::string buffer{};
+      expect(not glz::write_toml(m, buffer));
+      expect(buffer == "y = 2") << buffer;
+   };
+
+   "inline table entry with empty optional is dropped"_test = [] {
+      std::map<std::string, std::map<std::string, std::optional<int>>> m{{"t", {{"u", std::nullopt}, {"v", 1}}}};
+      std::string buffer{};
+      expect(not glz::write_toml(m, buffer));
+      expect(buffer == "t = {v = 1}") << buffer;
+   };
+
+   "map with only null entries writes an empty document"_test = [] {
+      std::map<std::string, std::optional<int>> m{{"x", std::nullopt}};
+      std::string buffer = "overwritten";
+      expect(not glz::write_toml(m, buffer));
+      expect(buffer.empty()) << buffer;
+   };
+
+   "map entry holding a nested or variant null is dropped"_test = [] {
+      std::map<std::string, std::optional<std::optional<int>>> nested{{"x", std::optional<int>{}}, {"y", 2}};
+      std::string buffer{};
+      expect(not glz::write_toml(nested, buffer));
+      expect(buffer == "y = 2") << buffer;
+
+      std::map<std::string, std::variant<std::monostate, int>> variants{{"x", std::monostate{}}, {"y", 2}};
+      expect(not glz::write_toml(variants, buffer));
+      expect(buffer == "y = 2") << buffer;
+   };
+
+   "struct fields holding generic, variant, or nested nulls are dropped"_test = [] {
+      toml_null_fields fields{.a = 1};
+      std::string buffer{};
+      expect(not glz::write_toml(fields, buffer));
+      expect(buffer == "a = 1") << buffer;
+
+      std::vector<toml_null_fields> rows{toml_null_fields{.a = 2}};
+      expect(not glz::write_toml(rows, buffer));
+      expect(buffer == "[{a = 2}]") << buffer;
+   };
+
+   "array element with empty optional fails the write"_test = [] {
+      std::vector<std::optional<int>> v{1, std::nullopt, 3};
+      std::string buffer{};
+      expect(glz::write_toml(v, buffer).ec == glz::error_code::feature_not_supported);
+   };
+
+   "trailing empty optional fails the write"_test = [] {
+      // Writing nothing here produced [1, ], which every parser reads as the
+      // one-element [1]: an element lost without an error on either side.
+      std::vector<std::optional<int>> v{1, std::nullopt};
+      std::string buffer{};
+      expect(glz::write_toml(v, buffer).ec == glz::error_code::feature_not_supported);
+   };
+
+   "null pointer and tuple elements fail the write"_test = [] {
+      std::vector<std::unique_ptr<int>> ptrs{};
+      ptrs.emplace_back(nullptr);
+      std::string buffer{};
+      expect(glz::write_toml(ptrs, buffer).ec == glz::error_code::feature_not_supported);
+
+      std::tuple<int, std::optional<int>> t{1, std::nullopt};
+      expect(glz::write_toml(t, buffer).ec == glz::error_code::feature_not_supported);
+   };
+
+   "engaged optional array elements still write"_test = [] {
+      std::vector<std::optional<int>> v{1, 2};
+      std::string buffer{};
+      expect(not glz::write_toml(v, buffer));
+      expect(buffer == "[1, 2]") << buffer;
+   };
+
+   "generic nulls are dropped from tables and kept as placeholders in arrays"_test = [] {
+      glz::generic g{};
+      expect(not glz::read_json(g, R"({"b":1,"x":null,"t":{"u":null,"v":1},"arr":[null,2]})"));
+      std::string buffer{};
+      expect(not glz::write_toml(g, buffer));
+      expect(buffer == "b = 1\nt = {v = 1}\narr = [\"\", 2]") << buffer;
+      glz::generic back{};
+      expect(not glz::read_toml(back, buffer)) << buffer;
+   };
+
+   "reader rejects a key with no value before the line ends"_test = [] {
+      glz::generic g{};
+      std::string in = "a = \nb = 1";
+      expect(glz::read_toml(g, in) == glz::error_code::syntax_error);
+      in = "a = # only a comment\n";
+      expect(glz::read_toml(g, in) == glz::error_code::syntax_error);
+   };
+
+   "reader rejects an inline table member with no value"_test = [] {
+      glz::generic g{};
+      std::string in = "t = {u = }";
+      expect(glz::read_toml(g, in) == glz::error_code::syntax_error);
+      in = "t = {u = , v = 1}";
+      expect(glz::read_toml(g, in) == glz::error_code::syntax_error);
+   };
+
+   "reader rejects an empty array element"_test = [] {
+      glz::generic g{};
+      std::string in = "arr = [1, , 2]";
+      expect(glz::read_toml(g, in) == glz::error_code::syntax_error);
+      in = "arr = [,]";
+      expect(glz::read_toml(g, in) == glz::error_code::syntax_error);
+   };
+};
+
 suite toml_context_reuse = [] {
    "a context reused after a failed read still reads"_test = [] {
       static constexpr glz::opts options{.format = glz::TOML};
@@ -6315,6 +6565,41 @@ suite toml_context_reuse = [] {
       const auto ec = glz::read<options>(second, good, ctx);
       expect(ec == glz::error_code::none) << glz::format_error(ec, good);
       expect(second == std::map<std::string, std::vector<std::vector<int>>>{{"a", {{1, 2}, {3}}}, {"b", {{4}}}});
+   };
+};
+
+suite toml_line_ending_backslash = [] {
+   auto read = [](const std::string& input, std::string& value) { return glz::read_toml(value, input); };
+
+   "line_ending_backslash_with_trailing_whitespace"_test = [&] {
+      // TOML 1.0: whitespace may follow the backslash before the newline
+      const std::string input = "\"\"\"a\\  \n  b\"\"\"";
+      std::string value{};
+      const auto error = read(input, value);
+      expect(not error) << glz::format_error(error, input);
+      expect(value == "ab") << value;
+   };
+
+   "line_ending_backslash_trims_blank_lines"_test = [&] {
+      const std::string input = "\"\"\"a\\\n\n  \n  b\"\"\"";
+      std::string value{};
+      const auto error = read(input, value);
+      expect(not error) << glz::format_error(error, input);
+      expect(value == "ab") << value;
+   };
+
+   "line_ending_backslash_crlf_with_trailing_whitespace"_test = [&] {
+      const std::string input = "\"\"\"a\\ \t\r\n\r\n  b\"\"\"";
+      std::string value{};
+      const auto error = read(input, value);
+      expect(not error) << glz::format_error(error, input);
+      expect(value == "ab") << value;
+   };
+
+   "backslash_space_not_before_newline_is_invalid"_test = [&] {
+      const std::string input = "\"\"\"a\\ b\"\"\"";
+      std::string value{};
+      expect(bool(read(input, value)));
    };
 };
 
