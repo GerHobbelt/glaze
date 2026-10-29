@@ -472,6 +472,7 @@ This option works with JSON, BEVE, CBOR, and MSGPACK formats. See [Nullable Type
 
 #### `float_max_write_precision`
 Limits the precision used when writing floating-point numbers. Options: `full`, `float32`, `float64`, `float128`.
+To set this option, define a custom options struct that inherits from `glz::opts` and includes a `float_max_write_precision` member.
 
 #### `float_format`
 Formats all floating-point numbers using `std::format` syntax (C++23). This provides control over decimal places, scientific notation, and other formatting options.
